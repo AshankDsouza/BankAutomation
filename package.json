@@ -1,0 +1,28 @@
+{
+  "name": "bankgpt",
+  "version": "1.0.0",
+  "description": "Goal: Look up https://www.ngpf.org/bank-sim/ and look up their current savings account balance.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AshankDsouza/BankAutomation.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/AshankDsouza/BankAutomation/issues"
+  },
+  "homepage": "https://github.com/AshankDsouza/BankAutomation#readme",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "tsx": "^4.23.13"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0"
+  }
+}
