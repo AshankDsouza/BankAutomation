@@ -36,8 +36,8 @@ Replay/discovery logs are emitted as JSON lines on stderr with levels:
 - `LOG_LEVEL=DEBUG|INFO|WARN|ERROR` (default: `INFO`)
 
 Each run is also saved automatically under `logs/` with this naming:
-- `<recipe-name>__<datetime>.log`
-- example: `logs/www.ngpf.org__tell-me-my-saving-account-balance__2026-09-18T22-30-05-123Z.log`
+- `<identified_allowed_action>_<datetime>.log`
+- example: `logs/retrieve_bank_details_2026-09-18T22-30-05-123Z.log`
 
 Each Playwright command log includes:
 - `step` number

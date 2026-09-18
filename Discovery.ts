@@ -64,24 +64,16 @@ function timestampForFilename(): string {
 }
 
 function sanitizeSegment(value: string): string {
-    const normalized = value.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+    const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
     return normalized || 'run';
 }
 
-function configureRunLogFile(url: string, task: string): void {
+function configureRunLogFile(allowedAction: string): void {
     if (process.env.LOG_FILE && process.env.LOG_FILE.trim().length > 0) {
         return;
     }
 
-    const recipePath = recipePathFor(url, task).replace(/\.ts$/i, '');
-    const recipeName = recipePath
-        .replace(/^recipes[\\/]/i, '')
-        .split(/[\\/]/)
-        .filter(Boolean)
-        .map(sanitizeSegment)
-        .join('__') || 'unknown-recipe';
-
-    process.env.LOG_FILE = path.join('logs', `${recipeName}__${timestampForFilename()}.log`);
+    process.env.LOG_FILE = path.join('logs', `${sanitizeSegment(normalizeTaskText(allowedAction))}_${timestampForFilename()}.log`);
 }
 
 function doesRecipeExist(URL: string, task: string): string {
@@ -160,7 +152,7 @@ function normalizeTaskText(value: string): string {
     return value.toLowerCase().replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
 }
 
-async function isTaskAllowed(task: string): Promise<boolean> {
+async function isTaskAllowed(task: string): Promise<IConfidenceResponse> {
     const allowedList = fs
         .readFileSync('allowed.txt', 'utf8')
         .split(/\r?\n/)
@@ -169,19 +161,23 @@ async function isTaskAllowed(task: string): Promise<boolean> {
     const normalizedTask = normalizeTaskText(task);
     const normalizedAllowed = allowedList.map(normalizeTaskText);
 
-    const directMatch = normalizedAllowed.some(
-        (allowedTask) =>
-            normalizedTask === allowedTask ||
-            normalizedTask.includes(allowedTask) ||
-            allowedTask.includes(normalizedTask),
+    const directMatch = allowedList.find(
+        (allowedTask) => {
+            const normalizedAllowedTask = normalizeTaskText(allowedTask);
+            return normalizedTask === normalizedAllowedTask ||
+                normalizedTask.includes(normalizedAllowedTask) ||
+                normalizedAllowedTask.includes(normalizedTask);
+        },
     );
     if (directMatch) {
-        return true;
+        return { action: directMatch, confidence: 1 };
     }
 
-    const allowsDetailsLookup = normalizedAllowed.some((allowedTask) => allowedTask.includes('retrieve bank details'));
-    if (allowsDetailsLookup && /(balance|details?)/.test(normalizedTask) && /(account|bank)/.test(normalizedTask)) {
-        return true;
+    const detailsLookupAction = allowedList.find((allowedTask) =>
+        normalizeTaskText(allowedTask).includes('retrieve bank details'),
+    );
+    if (detailsLookupAction && /(balance|details?)/.test(normalizedTask) && /(account|bank)/.test(normalizedTask)) {
+        return { action: detailsLookupAction, confidence: 1 };
     }
 
     const checkIsAllowedPrompt = `You are a task classifier.
@@ -241,26 +237,30 @@ Return a JSON object with exactly these keys:
     }
 
     if (parsed.action === null) {
-        return false;
+        return parsed;
     }
 
     const normalizedAction = normalizeTaskText(parsed.action);
-    const actionMatchesAllowed = normalizedAllowed.some((allowedTask) => normalizeTaskText(allowedTask) === normalizedAction);
-    return actionMatchesAllowed && parsed.confidence >= CONFIDENCE_SCORE_THRESHOLD;
+    const actionMatchesAllowed = normalizedAllowed.some((allowedTask) => allowedTask === normalizedAction);
+    if (!actionMatchesAllowed) {
+        return { action: null, confidence: parsed.confidence };
+    }
+
+    return parsed;
 }
 
 // This is the "main" function that will be called to execute the recipe
 
 async function executeRecipe(url: string, task: string): Promise<void> {
-    configureRunLogFile(url, task);
 
-    const allowed = await isTaskAllowed(task);
+    const allowedResponse: IConfidenceResponse = await isTaskAllowed(task);
 
-    if (!allowed) {
-        // log the error into the log file and throw an error
-        console.error(`Task "${task}" is not allowed.`);
-        throw new Error(`Task "${task}" is not allowed.`);
+    if (allowedResponse.action === null || allowedResponse.confidence < CONFIDENCE_SCORE_THRESHOLD) {
+        console.error(`Task "${task}" is not allowed. Confidence: ${allowedResponse.confidence}`);
+        throw new Error(`Task "${task}" is not allowed. Confidence: ${allowedResponse.confidence}`);
     }
+
+    configureRunLogFile(allowedResponse.action);
 
     let recipePath: string = await discoverRecipe(url, task);
 
