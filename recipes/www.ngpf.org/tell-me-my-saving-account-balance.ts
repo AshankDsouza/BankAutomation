@@ -3,19 +3,37 @@
 // Site: https://www.ngpf.org/bank-sim/
 // Recorded: 2026-09-17T19:45:44.015Z
 
-import { runRecipe, settle } from '../../recipeRuntime.ts';
+import { recipeClick, recipeExtract, recipeGoto, runRecipe, settle } from '../../recipeRuntime.ts';
+import type { Selector } from '../../recipeRuntime.ts';
 
 export const TASK = "tell me my saving account balance";
 export const URL = "https://www.ngpf.org/bank-sim/";
 
-export async function runAction(): Promise<Record<string, string>> {
-    return runRecipe(async (page, out) => {
-        await page.goto("https://www.ngpf.org/bank-sim/", { waitUntil: 'domcontentloaded' });
-        await settle(page);
-        await page.getByRole('button', { name: 'GET STARTED NOW' }).click();
-        await settle(page);
+const START_BUTTON_SELECTORS: Selector[] = [
+    { kind: 'role', role: 'button', name: 'GET STARTED NOW' },
+    { kind: 'text', value: 'GET STARTED NOW' },
+];
 
-        const savingsCard = page.locator('mat-card.home-cards', { hasText: 'Saving Account Activity' });
-        out.savings_balance = (await savingsCard.locator('.balance').innerText()).trim();
-    }, { headed: process.env.HEADED === "1" });
+const SAVINGS_BALANCE_SELECTORS: Selector[] = [
+    { kind: 'within', anchorText: 'Saving Account Activity', ancestor: 'mat-card', css: 'div.balance' },
+    { kind: 'css', value: 'mat-card.home-cards:nth-of-type(2) .balance' },
+];
+
+export async function runAction(
+    context: { recipePath?: string; inputTask?: string; inputUrl?: string } = {},
+): Promise<Record<string, string>> {
+    return runRecipe(async (page, out) => {
+        await recipeGoto(page, "https://www.ngpf.org/bank-sim/");
+        await settle(page);
+        await recipeClick(page, START_BUTTON_SELECTORS, 'button "GET STARTED NOW"');
+        await settle(page);
+        out.savings_balance = (await recipeExtract(page, SAVINGS_BALANCE_SELECTORS, 'savings balance')).trim();
+    }, {
+        headed: process.env.HEADED === "1",
+        recipe: context.recipePath,
+        recipeTask: TASK,
+        recipeUrl: URL,
+        inputTask: context.inputTask,
+        inputUrl: context.inputUrl,
+    });
 }

@@ -29,3 +29,22 @@ data).
 The through-line to keep in mind:
 The model discovers. The artifact becomes a reusable capability. Deterministic replay is
 how the AI agent invokes it in production.
+
+## Runtime logging
+
+Replay/discovery logs are emitted as JSON lines on stderr with levels:
+- `LOG_LEVEL=DEBUG|INFO|WARN|ERROR` (default: `INFO`)
+
+Each run is also saved automatically under `logs/` with this naming:
+- `<recipe-name>__<datetime>.log`
+- example: `logs/www.ngpf.org__tell-me-my-saving-account-balance__2026-09-18T22-30-05-123Z.log`
+
+Each Playwright command log includes:
+- `step` number
+- `command` name
+- `phase` (`discovery` or `replay`)
+- `recipe`, `recipeTask`, `recipeUrl`
+- `inputTask`, `inputUrl`
+- `domSnapshot` (single-line, truncated HTML snapshot)
+
+You can override the file path with `LOG_FILE=/custom/path.log`.

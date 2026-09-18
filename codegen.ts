@@ -15,15 +15,22 @@ export function generateRecipe(url: string, task: string, steps: Step[]): string
 // Site: ${url}
 // Recorded: ${new Date().toISOString()}
 
-import { resolve, runRecipe, settle } from '../../recipeRuntime.ts';
+import { recipeClick, recipeExtract, recipeFill, recipeGoto, recipePress, runRecipe, settle } from '../../recipeRuntime.ts';
 
 export const TASK = ${JSON.stringify(task)};
 export const URL = ${JSON.stringify(url)};
 
-export async function runAction(): Promise<Record<string, string>> {
+export async function runAction(context: { recipePath?: string; inputTask?: string; inputUrl?: string } = {}): Promise<Record<string, string>> {
     return runRecipe(async (page, out) => {
 ${body}
-    }, { headed: process.env.HEADED === "1" });
+    }, {
+        headed: process.env.HEADED === "1",
+        recipe: context.recipePath,
+        recipeTask: TASK,
+        recipeUrl: URL,
+        inputTask: context.inputTask,
+        inputUrl: context.inputUrl,
+    });
 }
 `;
 }
@@ -33,22 +40,22 @@ function render(step: Step): string {
     switch (step.action) {
         case 'goto':
             return (
-                `${pad}await page.goto(${JSON.stringify(step.url)}, { waitUntil: 'domcontentloaded' });\n` +
+                `${pad}await recipeGoto(page, ${JSON.stringify(step.url)});\n` +
                 `${pad}await settle(page);`
             );
         case 'click':
             return (
-                `${pad}await (await resolve(page, ${json(step.selectors)}, ${JSON.stringify(step.description)})).click();\n` +
+                `${pad}await recipeClick(page, ${json(step.selectors)}, ${JSON.stringify(step.description)});\n` +
                 `${pad}await settle(page);`
             );
         case 'fill':
-            return `${pad}await (await resolve(page, ${json(step.selectors)}, ${JSON.stringify(step.description)})).fill(${JSON.stringify(step.value)});`;
+            return `${pad}await recipeFill(page, ${json(step.selectors)}, ${JSON.stringify(step.description)}, ${JSON.stringify(step.value)});`;
         case 'press':
-            return `${pad}await page.keyboard.press(${JSON.stringify(step.key)});\n${pad}await settle(page);`;
+            return `${pad}await recipePress(page, ${JSON.stringify(step.key)});\n${pad}await settle(page);`;
         case 'extract':
             return (
-                `${pad}out[${JSON.stringify(step.name)}] = (await (await resolve(page, ${json(step.selectors)}, ` +
-                `${JSON.stringify(step.description)})).innerText()).trim();`
+                `${pad}out[${JSON.stringify(step.name)}] = (await recipeExtract(page, ${json(step.selectors)}, ` +
+                `${JSON.stringify(step.description)})).trim();`
             );
     }
 }
