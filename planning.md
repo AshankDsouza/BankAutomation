@@ -1,0 +1,11 @@
+
+
+1. Evaluation Layer: In this layer, the AI agent evaluates if the users task is inside the allowed list of actions. It will also check if we already have a cached replayable series of steps to complete this task without the LLM doing it directly. 
+
+2. Creating of Cached Recipe Layer: If the task is allowed and we do not have a cached recipe, we will create a series of steps to complete the task. This will be stored in a cache for future use.
+
+3. Executing Layer: In this layer, we will execute the stored cached "recipe" to complete the task. We will record it as a success if we have all the necessary information that proves that the task was compeleted. Example, if the task was to retrieve saving bank ballance number we should have a number that is not null. The recipe will need "ingredients"-- this is the information about the user. Bank details which will be provided and known at the time of the triggering of the task. 
+
+4. Escalation Layer: If the task if not allowed or if we do not have the necessary capability of information to complete the task, we will escalate the task to a human agent. The human agent will be able to complete the task and provide the necessary information to the user. In this layer, we will send a message on Team slack channel to notify the human team that a task has been escalated. One of the humans from the team will pick up the task and manually help the customer complete it. 
+
+5. Exceptional state handling: At every step of the recipe, we will check for the happy path and if it is not the happy path result we will get the LLM to take over and try to complete the task. If the LLM is not able to complete the task, we will escalate it to a human agent. For both the LLM and human takeover will provide the entire trace of what was asked, till what was completed, what was the unexpected outcome-- in short we will provide the entire context. We will record what the human or the LLM did and add it as a branch of the recipe(variant recipe) so that next time we reach such a state we can complete the task without human intervention by running the recipe. 

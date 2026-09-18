@@ -3,7 +3,7 @@
 // Site: https://www.ngpf.org/bank-sim/
 // Recorded: 2026-09-17T19:45:44.015Z
 
-import { resolve, runRecipe, settle } from '../../recipeRuntime.ts';
+import { runRecipe, settle } from '../../recipeRuntime.ts';
 
 export const TASK = "tell me my saving account balance";
 export const URL = "https://www.ngpf.org/bank-sim/";
@@ -12,13 +12,10 @@ export async function runAction(): Promise<Record<string, string>> {
     return runRecipe(async (page, out) => {
         await page.goto("https://www.ngpf.org/bank-sim/", { waitUntil: 'domcontentloaded' });
         await settle(page);
-        await page.keyboard.press("Tab");
+        await page.getByRole('button', { name: 'GET STARTED NOW' }).click();
         await settle(page);
-        await page.keyboard.press("Enter");
-        await settle(page);
-        await page.keyboard.press("Tab");
-        await settle(page);
-        await page.keyboard.press("Enter");
-        await settle(page);
-    });
+
+        const savingsCard = page.locator('mat-card.home-cards', { hasText: 'Saving Account Activity' });
+        out.savings_balance = (await savingsCard.locator('.balance').innerText()).trim();
+    }, { headed: process.env.HEADED === "1" });
 }

@@ -2,6 +2,51 @@
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import Anthropic from '@anthropic-ai/sdk';
+import { BrowserSession } from './browser.ts';
+import { browserTools } from './tools.ts';
+import { generateRecipe } from './codegen.ts';
+
+function loadEnvFile(envPath: string = ".env"): void {
+    if (!fs.existsSync(envPath)) {
+        return;
+    }
+
+    const envContent = fs.readFileSync(envPath, "utf8");
+
+    for (const line of envContent.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) {
+            continue;
+        }
+
+        const match = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+        if (!match) {
+            continue;
+        }
+
+        const [, key, rawValue] = match;
+        if (process.env[key] !== undefined) {
+            continue;
+        }
+
+        let value = rawValue.trim();
+        if (
+            (value.startsWith('"') && value.endsWith('"')) ||
+            (value.startsWith("'") && value.endsWith("'"))
+        ) {
+            value = value.slice(1, -1);
+        }
+
+        process.env[key] = value;
+    }
+}
+
+loadEnvFile();
+
+// Resolves credentials from the environment: ANTHROPIC_API_KEY,
+// ANTHROPIC_AUTH_TOKEN, or an `ant auth login` profile.
+const client = new Anthropic();
 
 // Both the domain and the task become path segments, so strip anything that
 // would make an unusable filename.
@@ -25,41 +70,40 @@ async function discoverRecipe(URL: string, task: string): Promise<string> {
         return recipePath;
     }
 
-    const PROMPT: string = "Using this website: " + URL + " and this task: " + task 
-                        + ", excecute this task on the website using playwright and"
-                        +" please store the playwright codegen steps to reproduce the action needed to be done "
-                        +" and store it in the folder called recipes. "
-                        + "You will do this by first adding it to the file PlaywrightStepsTemporaryFile.ts"
+    const session = new BrowserSession(process.env.HEADED === "1");
+    await session.start(URL);
 
-    const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-            "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-            model:  "llama-3.1-8b-instant",
+    try {
+        await client.beta.messages.toolRunner({
+            model: "claude-opus-5",
+            max_tokens: 16000,
+            thinking: { type: "adaptive" },
+            max_iterations: 30,
+            system:
+                "You are driving a real browser to accomplish a task on a live website. " +
+                "Call snapshot to see the page: it lists every visible element with a ref (e1, e2, ...). " +
+                "Act on elements by ref. Call screenshot only when the text snapshot is visually ambiguous. " +
+                "Refs change after every navigation, so take a fresh snapshot after each click. " +
+                "When you have located the information the task asks for, call extract on the element " +
+                "holding the value, then stop and state the value. " +
+                "Do not write any code -- the steps you take are recorded automatically.",
+            tools: browserTools(session),
             messages: [
                 {
                     role: "user",
-                    content: PROMPT,
+                    content: `Website: ${URL}\nTask: ${task}`,
                 },
             ],
-        }),
-    });
-
-    if (!groqResponse.ok) {
-        throw new Error(`Groq request failed: ${groqResponse.status} ${await groqResponse.text()}`);
+        });
+    } finally {
+        await session.close();
     }
 
-    const groqCompletion = await groqResponse.json();
-    const playwrightSteps = groqCompletion.choices?.[0]?.message?.content;
-
-    if (!playwrightSteps) {
-        throw new Error("Groq response did not include generated Playwright steps.");
+    if (session.steps.length === 0) {
+        throw new Error("Claude finished without performing any browser actions.");
     }
 
-    fs.writeFileSync("PlaywrightStepsTemporaryFile.ts", playwrightSteps);
+    fs.writeFileSync("PlaywrightStepsTemporaryFile.ts", generateRecipe(URL, task, session.steps));
 
     return createRecipe(URL, task);
 
@@ -90,7 +134,17 @@ async function executeRecipe(url: string, task: string): Promise<void> {
         throw new Error(`${recipePath} does not export a runAction() function`);
     }
 
-    await recipe.runAction();
+    const result = await recipe.runAction();
+    const entries = Object.entries(result);
+    if (entries.length === 0) {
+        throw new Error(`${recipePath} completed without extracting any values.`);
+    }
+
+    if (entries.length === 1) {
+        console.log(entries[0][1]);
+    } else {
+        console.log(entries.map(([key, value]) => `${key}: ${value}`).join('\n'));
+    }
 
     return;
 
