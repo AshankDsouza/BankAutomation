@@ -9,6 +9,49 @@ import { generateRecipe } from './codegen.ts';
 
 const CONFIDENCE_SCORE_THRESHOLD = 0.85;
 
+interface DiscoveryLimits {
+    maxIterations: number;
+    maxResponseTokens: number;
+    maxSteps: number;
+    maxTotalTokens: number;
+    timeoutMs: number;
+}
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+    const raw = process.env[name];
+    if (raw === undefined || raw.trim() === '') {
+        return fallback;
+    }
+
+    const value = Number.parseInt(raw, 10);
+    if (!Number.isFinite(value) || value <= 0) {
+        throw new Error(`${name} must be a positive integer.`);
+    }
+
+    return value;
+}
+
+function discoveryLimits(): DiscoveryLimits {
+    return {
+        maxIterations: readPositiveIntEnv('DISCOVERY_MAX_ITERATIONS', 20),
+        maxResponseTokens: readPositiveIntEnv('DISCOVERY_MAX_RESPONSE_TOKENS', 4000),
+        maxSteps: readPositiveIntEnv('DISCOVERY_MAX_STEPS', 20),
+        maxTotalTokens: readPositiveIntEnv('DISCOVERY_MAX_TOTAL_TOKENS', 50000),
+        timeoutMs: readPositiveIntEnv('DISCOVERY_TIMEOUT_MS', 120000),
+    };
+}
+
+function usedTokens(usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
+}): number {
+    return usage.input_tokens +
+        usage.output_tokens +
+        (usage.cache_creation_input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0);
+}
 
 function loadEnvFile(envPath: string = ".env"): void {
     if (!fs.existsSync(envPath)) {
@@ -90,18 +133,29 @@ async function discoverRecipe(URL: string, task: string): Promise<string> {
         return recipePath;
     }
 
+    const limits = discoveryLimits();
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => {
+        abortController.abort(new Error(`Discovery timed out after ${limits.timeoutMs}ms.`));
+    }, limits.timeoutMs);
+
     const session = new BrowserSession(process.env.HEADED === "1", {
         inputTask: task,
         inputUrl: URL,
+    }, {
+        maxRecordedSteps: limits.maxSteps,
     });
-    await session.start(URL);
 
     try {
-        await client.beta.messages.toolRunner({
+        await session.start(URL);
+
+        let totalTokens = 0;
+        const runner = client.beta.messages.toolRunner({
+            stream: false,
             model: "claude-opus-5",
-            max_tokens: 16000,
+            max_tokens: Math.min(limits.maxResponseTokens, limits.maxTotalTokens),
             thinking: { type: "adaptive" },
-            max_iterations: 30,
+            max_iterations: limits.maxIterations,
             system:
                 "You are driving a real browser to accomplish a task on a live website. " +
                 "Call snapshot to see the page: it lists every visible element with a ref (e1, e2, ...). " +
@@ -110,20 +164,40 @@ async function discoverRecipe(URL: string, task: string): Promise<string> {
                 "When you have located the information the task asks for, call extract on the element " +
                 "holding the value, then stop and state the value. " +
                 "Do not write any code -- the steps you take are recorded automatically.",
-            tools: browserTools(session),
+            tools: browserTools(session, { maxToolCalls: limits.maxSteps }),
             messages: [
                 {
                     role: "user",
                     content: `Website: ${URL}\nTask: ${task}`,
                 },
             ],
+        }, {
+            signal: abortController.signal,
         });
+
+        for await (const message of runner) {
+            totalTokens += usedTokens(message.usage);
+            if (totalTokens > limits.maxTotalTokens) {
+                abortController.abort(new Error(`Discovery token budget exceeded (${totalTokens}/${limits.maxTotalTokens}).`));
+                throw new Error(`Discovery token budget exceeded (${totalTokens}/${limits.maxTotalTokens}).`);
+            }
+        }
+    } catch (error) {
+        if (abortController.signal.aborted) {
+            const reason = abortController.signal.reason;
+            throw reason instanceof Error ? reason : new Error(String(reason));
+        }
+        throw error;
     } finally {
+        clearTimeout(timeout);
         await session.close();
     }
 
     if (session.steps.length === 0) {
         throw new Error("Claude finished without performing any browser actions.");
+    }
+    if (!session.steps.some((step) => step.action === 'extract')) {
+        throw new Error("Claude finished without extracting the requested value.");
     }
 
     fs.writeFileSync("PlaywrightStepsTemporaryFile.ts", generateRecipe(URL, task, session.steps));

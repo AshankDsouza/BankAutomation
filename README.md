@@ -48,3 +48,14 @@ Each Playwright command log includes:
 - `domSnapshot` (single-line, truncated HTML snapshot)
 
 You can override the file path with `LOG_FILE=/custom/path.log`.
+
+## Discovery limits
+
+Recipe discovery runs a bounded observe -> decide -> act loop against the live UI. Defaults:
+- `DISCOVERY_MAX_ITERATIONS=20`
+- `DISCOVERY_MAX_RESPONSE_TOKENS=4000`
+- `DISCOVERY_MAX_TOTAL_TOKENS=50000`
+- `DISCOVERY_MAX_STEPS=20`
+- `DISCOVERY_TIMEOUT_MS=120000`
+
+Discovery stops with an error if it hits a limit or finishes without extracting the requested value.

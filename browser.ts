@@ -27,6 +27,10 @@ export type Step =
     | { action: 'press'; key: string }
     | { action: 'extract'; selectors: Selector[]; description: string; name: string };
 
+interface BrowserSessionOptions {
+    maxRecordedSteps?: number;
+}
+
 /** What the in-page collector returns for one element. */
 interface RawCandidates {
     description: string;
@@ -51,10 +55,23 @@ export class BrowserSession {
     private browser!: Browser;
     private page!: Page;
     private readonly logger: PlaywrightCommandLogger;
+    private readonly maxRecordedSteps: number;
     readonly steps: Step[] = [];
 
-    constructor(private readonly headed: boolean = false, metadata: Omit<PlaywrightLogMetadata, 'phase'> = {}) {
+    constructor(
+        private readonly headed: boolean = false,
+        metadata: Omit<PlaywrightLogMetadata, 'phase'> = {},
+        options: BrowserSessionOptions = {},
+    ) {
         this.logger = new PlaywrightCommandLogger({ phase: 'discovery', ...metadata });
+        this.maxRecordedSteps = options.maxRecordedSteps ?? Number.POSITIVE_INFINITY;
+    }
+
+    private recordStep(step: Step): void {
+        if (this.steps.length >= this.maxRecordedSteps) {
+            throw new Error(`Discovery max steps reached (${this.maxRecordedSteps}).`);
+        }
+        this.steps.push(step);
     }
 
     async start(url: string): Promise<void> {
@@ -82,7 +99,7 @@ export class BrowserSession {
             { page: this.page, details: { url, waitUntil: 'domcontentloaded', timeout: 30000 } },
         );
         await this.settle();
-        this.steps.push({ action: 'goto', url });
+        this.recordStep({ action: 'goto', url });
         return `Navigated to ${this.page.url()}`;
     }
 
@@ -195,7 +212,7 @@ export class BrowserSession {
             details: { ref, description, timeout: 10000 },
         });
         await this.settle();
-        this.steps.push({ action: 'click', selectors, description });
+        this.recordStep({ action: 'click', selectors, description });
         return `Clicked ${description}. Now at ${this.page.url()}. Call snapshot to see the new state.`;
     }
 
@@ -205,7 +222,7 @@ export class BrowserSession {
             page: this.page,
             details: { ref, description, timeout: 10000 },
         });
-        this.steps.push({ action: 'fill', selectors, description, value });
+        this.recordStep({ action: 'fill', selectors, description, value });
         return `Filled ${description}.`;
     }
 
@@ -215,7 +232,7 @@ export class BrowserSession {
             details: { key },
         });
         await this.settle();
-        this.steps.push({ action: 'press', key });
+        this.recordStep({ action: 'press', key });
         return `Pressed ${key}. Call snapshot to see the new state.`;
     }
 
@@ -227,7 +244,7 @@ export class BrowserSession {
                 details: { ref, name, description, timeout: 10000 },
             })
         ).trim();
-        this.steps.push({ action: 'extract', selectors, description, name });
+        this.recordStep({ action: 'extract', selectors, description, name });
         return `Extracted ${name} = ${JSON.stringify(text)} from ${description}.`;
     }
 

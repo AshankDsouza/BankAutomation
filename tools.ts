@@ -18,7 +18,20 @@ function log(name: string, input: unknown, result: string): string {
     return result;
 }
 
-export function browserTools(session: BrowserSession) {
+interface BrowserToolOptions {
+    maxToolCalls?: number;
+}
+
+export function browserTools(session: BrowserSession, options: BrowserToolOptions = {}) {
+    let toolCalls = 0;
+
+    const guardToolCall = (name: string): void => {
+        toolCalls += 1;
+        if (options.maxToolCalls !== undefined && toolCalls > options.maxToolCalls) {
+            throw new Error(`Discovery max steps reached (${options.maxToolCalls}) before ${name}.`);
+        }
+    };
+
     return [
         betaZodTool({
             name: 'snapshot',
@@ -26,7 +39,10 @@ export function browserTools(session: BrowserSession) {
                 'List every visible element on the current page with a ref (e1, e2, ...), its role and its text. ' +
                 'Take a fresh snapshot after every navigation -- refs from an older snapshot go stale.',
             inputSchema: z.object({}),
-            run: async () => log('snapshot', {}, await session.snapshot()),
+            run: async () => {
+                guardToolCall('snapshot');
+                return log('snapshot', {}, await session.snapshot());
+            },
         }),
 
         betaZodTool({
@@ -35,16 +51,19 @@ export function browserTools(session: BrowserSession) {
                 'Look at the rendered page as an image. Use when the snapshot text is visually ambiguous ' +
                 '(overlapping dialogs, which of two identical labels is which, layout questions).',
             inputSchema: z.object({}),
-            run: async () => [
-                {
-                    type: 'image' as const,
-                    source: {
-                        type: 'base64' as const,
-                        media_type: 'image/png' as const,
-                        data: await session.screenshot(),
+            run: async () => {
+                guardToolCall('screenshot');
+                return [
+                    {
+                        type: 'image' as const,
+                        source: {
+                            type: 'base64' as const,
+                            media_type: 'image/png' as const,
+                            data: await session.screenshot(),
+                        },
                     },
-                },
-            ],
+                ];
+            },
         }),
 
         betaZodTool({
@@ -53,7 +72,10 @@ export function browserTools(session: BrowserSession) {
             inputSchema: z.object({
                 ref: z.string().describe('Element ref from the latest snapshot, e.g. "e12"'),
             }),
-            run: async ({ ref }) => log('click', { ref }, await session.click(ref)),
+            run: async ({ ref }) => {
+                guardToolCall('click');
+                return log('click', { ref }, await session.click(ref));
+            },
         }),
 
         betaZodTool({
@@ -63,14 +85,20 @@ export function browserTools(session: BrowserSession) {
                 ref: z.string().describe('Element ref from the latest snapshot'),
                 value: z.string().describe('Text to type'),
             }),
-            run: async ({ ref, value }) => log('fill', { ref, value }, await session.fill(ref, value)),
+            run: async ({ ref, value }) => {
+                guardToolCall('fill');
+                return log('fill', { ref, value }, await session.fill(ref, value));
+            },
         }),
 
         betaZodTool({
             name: 'press',
             description: 'Press a keyboard key, e.g. "Enter" or "Escape".',
             inputSchema: z.object({ key: z.string() }),
-            run: async ({ key }) => log('press', { key }, await session.press(key)),
+            run: async ({ key }) => {
+                guardToolCall('press');
+                return log('press', { key }, await session.press(key));
+            },
         }),
 
         betaZodTool({
@@ -84,7 +112,10 @@ export function browserTools(session: BrowserSession) {
                     .string()
                     .describe('Name for this value in the result, e.g. "savings_balance"'),
             }),
-            run: async ({ ref, name }) => log('extract', { ref, name }, await session.extract(ref, name)),
+            run: async ({ ref, name }) => {
+                guardToolCall('extract');
+                return log('extract', { ref, name }, await session.extract(ref, name));
+            },
         }),
     ];
 }
