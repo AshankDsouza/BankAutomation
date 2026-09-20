@@ -19,6 +19,7 @@ export interface RunRecipeOptions {
     recipeUrl?: string;
     inputTask?: string;
     inputUrl?: string;
+    parameters?: Record<string, unknown>;
 }
 
 function replayLogger(): PlaywrightCommandLogger | undefined {
@@ -76,6 +77,7 @@ export async function runRecipe(
         recipeUrl: options.recipeUrl,
         inputTask: options.inputTask,
         inputUrl: options.inputUrl,
+        parameters: options.parameters,
     });
 
     const browser = await logger.run('chromium.launch', async () => chromium.launch({ headless: !options.headed }), {

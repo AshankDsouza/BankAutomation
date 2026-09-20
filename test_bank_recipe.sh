@@ -7,4 +7,4 @@ set +a
 : "${HEADED:=1}"
 export HEADED
 
-npx tsx Discovery.ts "https://www.ngpf.org/bank-sim/" "tell me my saving account balance"
+npx tsx Discovery.ts "https://www.ngpf.org/bank-sim/" "tell me my total bills"

@@ -12,6 +12,7 @@ export interface PlaywrightLogMetadata {
     recipeUrl?: string;
     inputTask?: string;
     inputUrl?: string;
+    parameters?: Record<string, unknown>;
 }
 
 const LEVEL_ORDER: Record<LogLevel, number> = {

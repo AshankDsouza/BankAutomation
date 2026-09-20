@@ -31,7 +31,7 @@ function readPositiveIntEnv(name: string, fallback: number): number {
     return value;
 }
 
-function discoveryLimits(): DiscoveryLimits {
+function getLimits(): DiscoveryLimits {
     return {
         maxIterations: readPositiveIntEnv('DISCOVERY_MAX_ITERATIONS', 20),
         maxResponseTokens: readPositiveIntEnv('DISCOVERY_MAX_RESPONSE_TOKENS', 4000),
@@ -51,6 +51,22 @@ function usedTokens(usage: {
         usage.output_tokens +
         (usage.cache_creation_input_tokens ?? 0) +
         (usage.cache_read_input_tokens ?? 0);
+}
+
+function extractText(content: Array<{ type: string; text?: string }>): string {
+    return content
+        .filter((block): block is { type: string; text: string } => block.type === 'text' && typeof block.text === 'string')
+        .map((block) => block.text)
+        .join('\n')
+        .trim();
+}
+
+function stripCodeFence(source: string): string {
+    return source
+        .trim()
+        .replace(/^```(?:typescript|ts)?\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
 }
 
 function loadEnvFile(envPath: string = ".env"): void {
@@ -94,12 +110,18 @@ loadEnvFile();
 // ANTHROPIC_AUTH_TOKEN, or an `ant auth login` profile.
 const client = new Anthropic();
 
-// Both the domain and the task become path segments, so strip anything that
-// would make an unusable filename.
-function recipePathFor(url: string, task: string): string {
-    const domain = new URL(url).hostname;
-    const slug = task.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    return path.join("recipes", domain, slug + ".ts");
+function canonicalWebsiteSlug(websiteUrl: string): string {
+    const parsed = new URL(websiteUrl);
+    const canonical = `${parsed.hostname}${parsed.pathname}`.replace(/\/+$/, '');
+    return canonical.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+// Both the allowed action and the website become path segments, so strip
+// anything that would make an unusable filename.
+function recipePathFor(allowedAction: string, websiteUrl: string): string {
+    const actionSlug = normalizeTaskText(allowedAction).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const websiteSlug = canonicalWebsiteSlug(websiteUrl);
+    return path.join("recipes", `${actionSlug}-${websiteSlug}.ts`);
 }
 
 function timestampForFilename(): string {
@@ -119,21 +141,21 @@ function configureRunLogFile(allowedAction: string): void {
     process.env.LOG_FILE = path.join('logs', `${sanitizeSegment(normalizeTaskText(allowedAction))}_${timestampForFilename()}.log`);
 }
 
-function doesRecipeExist(URL: string, task: string): string {
-    const recipePath = recipePathFor(URL, task);
+function doesRecipeExist(allowedAction: string, websiteUrl: string): string {
+    const recipePath = recipePathFor(allowedAction, websiteUrl);
     return fs.existsSync(recipePath) ? recipePath : "";
 }
 
 
-async function discoverRecipe(URL: string, task: string): Promise<string> {
+async function discoverRecipe(URL: string, task: string, allowedAction: string, parameters: TaskParameters): Promise<string> {
 
-    let recipePath: string = doesRecipeExist(URL, task);
+    let recipePath: string = doesRecipeExist(allowedAction, URL);
 
     if (recipePath !== "") {
         return recipePath;
     }
 
-    const limits = discoveryLimits();
+    const limits = getLimits();
     const abortController = new AbortController();
     const timeout = setTimeout(() => {
         abortController.abort(new Error(`Discovery timed out after ${limits.timeoutMs}ms.`));
@@ -142,9 +164,11 @@ async function discoverRecipe(URL: string, task: string): Promise<string> {
     const session = new BrowserSession(process.env.HEADED === "1", {
         inputTask: task,
         inputUrl: URL,
+        parameters,
     }, {
         maxRecordedSteps: limits.maxSteps,
     });
+    let recipeSource = '';
 
     try {
         await session.start(URL);
@@ -182,6 +206,15 @@ async function discoverRecipe(URL: string, task: string): Promise<string> {
                 throw new Error(`Discovery token budget exceeded (${totalTokens}/${limits.maxTotalTokens}).`);
             }
         }
+
+        if (session.steps.length === 0) {
+            throw new Error("Claude finished without performing any browser actions.");
+        }
+        if (!session.steps.some((step) => step.action === 'extract')) {
+            throw new Error("Claude finished without extracting the requested value.");
+        }
+
+        recipeSource = generateRecipe(URL, task, allowedAction, parameters, session.steps);
     } catch (error) {
         if (abortController.signal.aborted) {
             const reason = abortController.signal.reason;
@@ -193,24 +226,14 @@ async function discoverRecipe(URL: string, task: string): Promise<string> {
         await session.close();
     }
 
-    if (session.steps.length === 0) {
-        throw new Error("Claude finished without performing any browser actions.");
-    }
-    if (!session.steps.some((step) => step.action === 'extract')) {
-        throw new Error("Claude finished without extracting the requested value.");
-    }
-
-    fs.writeFileSync("PlaywrightStepsTemporaryFile.ts", generateRecipe(URL, task, session.steps));
-
-    return createRecipe(URL, task);
+    return createRecipe(URL, allowedAction, recipeSource);
 
 }
 
 
-function createRecipe(url: string, task: string): string {
-    let recipePath: string = recipePathFor(url, task);
+function createRecipe(url: string, allowedAction: string, playwrightSteps: string): string {
+    let recipePath: string = recipePathFor(allowedAction, url);
 
-    const playwrightSteps = fs.readFileSync('PlaywrightStepsTemporaryFile.ts', 'utf8');
     fs.mkdirSync(path.dirname(recipePath), { recursive: true });
     fs.writeFileSync(recipePath, playwrightSteps);
     return recipePath;
@@ -220,13 +243,20 @@ function createRecipe(url: string, task: string): string {
 interface IConfidenceResponse {
     action: string | null;
     confidence: number;
+    parameters: TaskParameters;
 }
 
 function normalizeTaskText(value: string): string {
     return value.toLowerCase().replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
 }
 
-async function isTaskAllowed(task: string): Promise<IConfidenceResponse> {
+type TaskParameters = Record<string, unknown>;
+
+function isTaskParameters(value: unknown): value is TaskParameters {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+async function classifyTask(task: string): Promise<IConfidenceResponse> {
     const allowedList = fs
         .readFileSync('allowed.txt', 'utf8')
         .split(/\r?\n/)
@@ -238,26 +268,21 @@ async function isTaskAllowed(task: string): Promise<IConfidenceResponse> {
     const directMatch = allowedList.find(
         (allowedTask) => {
             const normalizedAllowedTask = normalizeTaskText(allowedTask);
-            return normalizedTask === normalizedAllowedTask ||
+            return (
+                normalizedTask === normalizedAllowedTask ||
                 normalizedTask.includes(normalizedAllowedTask) ||
-                normalizedAllowedTask.includes(normalizedTask);
+                normalizedAllowedTask.includes(normalizedTask)
+            );
         },
     );
     if (directMatch) {
-        return { action: directMatch, confidence: 1 };
-    }
-
-    const detailsLookupAction = allowedList.find((allowedTask) =>
-        normalizeTaskText(allowedTask).includes('retrieve bank details'),
-    );
-    if (detailsLookupAction && /(balance|details?)/.test(normalizedTask) && /(account|bank)/.test(normalizedTask)) {
-        return { action: detailsLookupAction, confidence: 1 };
+        return { action: directMatch, confidence: 1, parameters: {} };
     }
 
     const checkIsAllowedPrompt = `You are a task classifier.
 
 The user will provide a natural-language request.
-Determine whether the request matches one of the allowed tasks.
+Determine whether the request matches one of the allowed tasks and extract the parameters needed to run the recipe.
 
 Allowed tasks:
 ${allowedList.map((task, index) => `${index + 1}. ${task}`).join('\n')}
@@ -270,22 +295,25 @@ Rules:
 - If no allowed task matches, return null.
 - Return a confidence between 0 and 1.
 - Confidence represents your confidence that the classification is correct, not how similar the wording is.
+- Parameters must be an object containing only values explicitly provided by the user and needed to perform the selected action.
+- Use an empty object when the request provides no action parameters.
 - Return JSON only.
 
 Output format:
 Return a JSON object with exactly these keys:
 {
   "action": "<matched allowed task text or null>",
-  "confidence": <number between 0 and 1>
+  "confidence": <number between 0 and 1>,
+  "parameters": { "<parameter name>": "<parameter value>" }
 }`;
 
     const response = await client.messages.create({
-        model: "claude-opus-5",
+        model: 'claude-opus-5',
         max_tokens: 300,
         thinking: { type: 'disabled' },
         messages: [
             {
-                role: "user",
+                role: 'user',
                 content: checkIsAllowedPrompt,
             },
         ],
@@ -306,8 +334,21 @@ Return a JSON object with exactly these keys:
         );
     }
 
-    if (typeof parsed.confidence !== 'number') {
-        throw new Error('Task classifier response is missing a numeric confidence.');
+    if (
+        typeof parsed.confidence !== 'number' ||
+        !Number.isFinite(parsed.confidence) ||
+        parsed.confidence < 0 ||
+        parsed.confidence > 1
+    ) {
+        throw new Error('Task classifier response must contain a confidence between 0 and 1.');
+    }
+
+    if (!isTaskParameters(parsed.parameters)) {
+        throw new Error('Task classifier response must contain a parameters object.');
+    }
+
+    if (parsed.action !== null && typeof parsed.action !== 'string') {
+        throw new Error('Task classifier response action must be a string or null.');
     }
 
     if (parsed.action === null) {
@@ -317,7 +358,7 @@ Return a JSON object with exactly these keys:
     const normalizedAction = normalizeTaskText(parsed.action);
     const actionMatchesAllowed = normalizedAllowed.some((allowedTask) => allowedTask === normalizedAction);
     if (!actionMatchesAllowed) {
-        return { action: null, confidence: parsed.confidence };
+        return { action: null, confidence: parsed.confidence, parameters: parsed.parameters };
     }
 
     return parsed;
@@ -327,7 +368,7 @@ Return a JSON object with exactly these keys:
 
 async function executeRecipe(url: string, task: string): Promise<void> {
 
-    const allowedResponse: IConfidenceResponse = await isTaskAllowed(task);
+    const allowedResponse: IConfidenceResponse = await classifyTask(task);
 
     if (allowedResponse.action === null || allowedResponse.confidence < CONFIDENCE_SCORE_THRESHOLD) {
         console.error(`Task "${task}" is not allowed. Confidence: ${allowedResponse.confidence}`);
@@ -336,7 +377,7 @@ async function executeRecipe(url: string, task: string): Promise<void> {
 
     configureRunLogFile(allowedResponse.action);
 
-    let recipePath: string = await discoverRecipe(url, task);
+    let recipePath: string = await discoverRecipe(url, task, allowedResponse.action, allowedResponse.parameters);
 
     // A bare relative path is treated as a package name by import(), so resolve
     // it to an absolute file:// URL first.
@@ -350,6 +391,7 @@ async function executeRecipe(url: string, task: string): Promise<void> {
         recipePath,
         inputTask: task,
         inputUrl: url,
+        parameters: allowedResponse.parameters,
     });
     const entries = Object.entries(result);
     if (entries.length === 0) {

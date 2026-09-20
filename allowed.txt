@@ -1,2 +1,3 @@
-retrieve bank details (this does not include sensitive information such as account numbers or passwords)
+retrieve bank account balance details (this does not include sensitive information such as account numbers or passwords)
 create a type of bank account
+retrieve bills information

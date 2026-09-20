@@ -124,20 +124,20 @@ export class BrowserSession {
         const lines = await this.logger.run(
             'page.evaluate(snapshot)',
             async () =>
-                this.page.evaluate((refAttr) => {
-                    const INTERACTIVE = 'a,button,input,select,textarea,[role="button"],[role="link"],[role="tab"],mat-select';
-                    const out: string[] = [];
+                this.page.evaluate(new Function('refAttr', `
+                    const interactive = 'a,button,input,select,textarea,[role="button"],[role="link"],[role="tab"],mat-select';
+                    const out = [];
                     let n = 0;
 
-                    document.querySelectorAll(`[${refAttr}]`).forEach((el) => el.removeAttribute(refAttr));
+                    document.querySelectorAll('[' + refAttr + ']').forEach((el) => el.removeAttribute(refAttr));
 
-                    const visible = (el: Element): boolean => {
+                    const visible = (el) => {
                         const r = el.getBoundingClientRect();
                         const s = getComputedStyle(el);
                         return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
                     };
 
-                    const roleOf = (el: Element): string => {
+                    const roleOf = (el) => {
                         const explicit = el.getAttribute('role');
                         if (explicit) return explicit;
                         const tag = el.tagName.toLowerCase();
@@ -146,7 +146,7 @@ export class BrowserSession {
                         if (tag === 'select' || tag === 'mat-select') return 'combobox';
                         if (tag === 'textarea') return 'textbox';
                         if (tag === 'input') {
-                            const t = (el as HTMLInputElement).type;
+                            const t = el.type;
                             if (t === 'checkbox') return 'checkbox';
                             if (t === 'radio') return 'radio';
                             if (t === 'submit' || t === 'button') return 'button';
@@ -155,41 +155,39 @@ export class BrowserSession {
                         return '';
                     };
 
-                    const nameOf = (el: Element): string =>
-                        (el.getAttribute('aria-label') || (el as HTMLElement).innerText || '')
-                            .replace(/\s+/g, ' ')
+                    const nameOf = (el) =>
+                        (el.getAttribute('aria-label') || el.innerText || '')
+                            .replace(/\\s+/g, ' ')
                             .trim()
                             .slice(0, 80);
 
-                    const tag = (el: Element, line: (ref: string) => string): void => {
+                    const tagElement = (el, line) => {
                         const ref = 'e' + ++n;
                         el.setAttribute(refAttr, ref);
                         out.push(line(ref));
                     };
 
-                    document.querySelectorAll(INTERACTIVE).forEach((el) => {
+                    document.querySelectorAll(interactive).forEach((el) => {
                         if (!visible(el)) return;
                         const role = roleOf(el) || el.tagName.toLowerCase();
                         const name = nameOf(el);
                         const ph = el.getAttribute('placeholder');
-                        tag(el, (ref) => `${ref} ${role} "${name}"${ph ? ` placeholder="${ph}"` : ''}`);
+                        tagElement(el, (ref) => ref + ' ' + role + ' "' + name + '"' + (ph ? ' placeholder="' + ph + '"' : ''));
                     });
 
-                    // Leaf text nodes: these are what an extraction reads. A balance on
-                    // this kind of app is often an unlabeled div, so include them.
                     document.querySelectorAll('body *').forEach((el) => {
                         if (el.children.length > 0 || !visible(el)) return;
-                        if (el.hasAttribute(refAttr) || el.closest(INTERACTIVE)) return;
-                        const text = ((el as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim();
+                        if (el.hasAttribute(refAttr) || el.closest(interactive)) return;
+                        const text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
                         if (!text || text.length > 120) return;
                         const card = el.closest('mat-card,section,article,form,li,tr');
-                        const heading = card?.querySelector('mat-card-title,h1,h2,h3,h4,[class*="title"]');
-                        const context = heading ? ` (in "${(heading as HTMLElement).innerText.trim().slice(0, 60)}")` : '';
-                        tag(el, (ref) => `${ref} text "${text}"${context}`);
+                        const heading = card ? card.querySelector('mat-card-title,h1,h2,h3,h4,[class*="title"]') : null;
+                        const context = heading ? ' (in "' + heading.innerText.trim().slice(0, 60) + '")' : '';
+                        tagElement(el, (ref) => ref + ' text "' + text + '"' + context);
                     });
 
                     return out;
-                }, REF_ATTR),
+                `) as (refAttr: string) => string[], REF_ATTR),
             { page: this.page },
         );
 
@@ -268,20 +266,19 @@ export class BrowserSession {
         const raw = await this.logger.run(
             'locator.evaluate(collect-selector-candidates)',
             async () =>
-                live.evaluate((el: Element): RawCandidates => {
-                    const text = ((el as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim();
+                live.evaluate(new Function('el', `
+                    const text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
                     const tagName = el.tagName.toLowerCase();
 
-                    const cssFor = (node: Element): string => {
-                        if (node.id) return `#${CSS.escape(node.id)}`;
+                    const cssFor = (node) => {
+                        if (node.id) return '#' + CSS.escape(node.id);
                         const classes = Array.from(node.classList)
-                            // Framework-generated and state classes churn between builds.
-                            .filter((c) => !/^(ng-|cdk-|mat-focus|mat-ripple)/.test(c) && !/\d/.test(c))
+                            .filter((c) => !/^(ng-|cdk-|mat-focus|mat-ripple)/.test(c) && !/\\d/.test(c))
                             .slice(0, 2);
-                        return node.tagName.toLowerCase() + classes.map((c) => `.${CSS.escape(c)}`).join('');
+                        return node.tagName.toLowerCase() + classes.map((c) => '.' + CSS.escape(c)).join('');
                     };
 
-                    const roleOf = (): string => {
+                    const roleOf = () => {
                         const explicit = el.getAttribute('role');
                         if (explicit) return explicit;
                         if (tagName === 'a') return 'link';
@@ -289,7 +286,7 @@ export class BrowserSession {
                         if (tagName === 'textarea') return 'textbox';
                         if (tagName === 'select') return 'combobox';
                         if (tagName === 'input') {
-                            const t = (el as HTMLInputElement).type;
+                            const t = el.type;
                             if (t === 'checkbox' || t === 'radio') return t;
                             if (t === 'submit' || t === 'button') return 'button';
                             return 'textbox';
@@ -297,21 +294,21 @@ export class BrowserSession {
                         return '';
                     };
 
-                    const labelText = ((): string | undefined => {
+                    const labelText = (() => {
                         const id = el.getAttribute('id');
                         if (id) {
-                            const lbl = document.querySelector(`label[for="${CSS.escape(id)}"]`);
-                            if (lbl) return (lbl as HTMLElement).innerText.trim();
+                            const lbl = document.querySelector('label[for="' + CSS.escape(id) + '"]');
+                            if (lbl) return lbl.innerText.trim();
                         }
                         const wrapper = el.closest('label');
-                        return wrapper ? (wrapper as HTMLElement).innerText.trim() : undefined;
+                        return wrapper ? wrapper.innerText.trim() : undefined;
                     })();
 
-                    const within = ((): RawCandidates['within'] => {
+                    const within = (() => {
                         const container = el.closest('mat-card,section,article,form,li,tr');
                         if (!container || container === el) return undefined;
                         const heading = container.querySelector('mat-card-title,h1,h2,h3,h4,[class*="title"]');
-                        const anchorText = heading ? (heading as HTMLElement).innerText.trim() : '';
+                        const anchorText = heading ? heading.innerText.trim() : '';
                         if (!anchorText) return undefined;
                         return {
                             anchorText: anchorText.slice(0, 60),
@@ -321,19 +318,20 @@ export class BrowserSession {
                     })();
 
                     const name = (el.getAttribute('aria-label') || text).slice(0, 60);
+                    const role = roleOf();
 
                     return {
-                        description: `${roleOf() || tagName} "${(name || text).slice(0, 40)}"`,
-                        testId: el.getAttribute('data-testid') ?? el.getAttribute('data-test') ?? undefined,
-                        role: roleOf() || undefined,
+                        description: (role || tagName) + ' "' + (name || text).slice(0, 40) + '"',
+                        testId: el.getAttribute('data-testid') || el.getAttribute('data-test') || undefined,
+                        role: role || undefined,
                         name: name || undefined,
                         label: labelText,
-                        placeholder: el.getAttribute('placeholder') ?? undefined,
+                        placeholder: el.getAttribute('placeholder') || undefined,
                         text: text && text.length <= 60 ? text : undefined,
-                        css: el.id ? `#${el.id}` : undefined,
+                        css: el.id ? '#' + el.id : undefined,
                         within,
                     };
-                }),
+                `) as (el: Element) => RawCandidates),
             { page: this.page, details: { ref } },
         );
 
