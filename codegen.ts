@@ -1,8 +1,6 @@
 import type { Step } from './browser.ts';
 
-interface TaskParameters {
-    accountScope?: 'savings' | 'checking' | 'all';
-}
+type TaskParameters = Record<string, unknown>;
 
 const BANK_BALANCE_ACTION = 'retrieve bank account balance details';
 
@@ -60,15 +58,7 @@ export const TASK = ${JSON.stringify(task)};
 export const ACTION = ${JSON.stringify(allowedAction)};
 export const URL = ${JSON.stringify(url)};
 
-type AccountScope = 'savings' | 'checking' | 'all';
-
-interface RecipeParameters {
-    accountScope?: AccountScope;
-    [key: string]: unknown;
-}
-
 interface AccountConfig {
-    key: Exclude<AccountScope, 'all'>;
     label: string;
     anchors: string[];
     outputKey: string;
@@ -76,34 +66,16 @@ interface AccountConfig {
 
 const ACCOUNTS: AccountConfig[] = [
     {
-        key: 'savings',
         label: 'Savings',
         anchors: ['Saving Account Activity', 'Savings Account', 'SAVINGS'],
         outputKey: 'savings_balance',
     },
     {
-        key: 'checking',
         label: 'Checking',
         anchors: ['Checking Account Activity', 'Checking Account', 'CHECKING'],
         outputKey: 'checking_balance',
     },
 ];
-
-function resolveParameters(inputTask?: string, inputParameters?: RecipeParameters): RecipeParameters {
-    const scope = inputParameters?.accountScope ?? inferAccountScope(inputTask ?? TASK);
-    return { accountScope: scope };
-}
-
-function inferAccountScope(text: string): AccountScope {
-    const normalized = text.toLowerCase();
-    if (/(all|total|combined|sum|every account)/.test(normalized)) {
-        return 'all';
-    }
-    if (/(check|checking|chequing|current)/.test(normalized)) {
-        return 'checking';
-    }
-    return 'savings';
-}
 
 function balanceSelectors(account: AccountConfig): Selector[] {
     return account.anchors.flatMap((anchor) => [
@@ -111,10 +83,6 @@ function balanceSelectors(account: AccountConfig): Selector[] {
         { kind: 'within', anchorText: anchor, ancestor: 'mat-card', css: 'div' },
         { kind: 'within', anchorText: anchor, ancestor: 'div', css: '.balance' },
     ]);
-}
-
-function parseCurrency(value: string): number {
-    return Number.parseFloat(value.replace(/[^0-9.-]/g, '')) || 0;
 }
 
 async function extractBalance(
@@ -127,7 +95,6 @@ async function extractBalance(
 export async function runAction(
     context: { recipePath?: string; inputTask?: string; inputUrl?: string; parameters?: Record<string, unknown> } = {},
 ): Promise<Record<string, string>> {
-    const parameters = resolveParameters(context.inputTask, context.parameters as RecipeParameters | undefined);
     const targetUrl = context.inputUrl && context.inputUrl.trim().length > 0 ? context.inputUrl : URL;
 
     return runRecipe(async (page, out) => {
@@ -143,26 +110,9 @@ export async function runAction(
         );
         await settle(page);
 
-        if (parameters.accountScope === 'all') {
-            const balances: Record<string, string> = {};
-            let total = 0;
-            for (const account of ACCOUNTS) {
-                const balance = (await extractBalance(page, account)).trim();
-                balances[account.outputKey] = balance;
-                total += parseCurrency(balance);
-            }
-            Object.assign(out, balances);
-            out.account_scope = 'all';
-            out.total_balance = total.toFixed(2);
-            return;
+        for (const account of ACCOUNTS) {
+            out[account.outputKey] = (await extractBalance(page, account)).trim();
         }
-
-        const account = ACCOUNTS.find((item) => item.key === parameters.accountScope) ?? ACCOUNTS[0];
-        const balance = (await extractBalance(page, account)).trim();
-        out[account.outputKey] = balance;
-        out.account_scope = account.key;
-        out.account = account.label;
-        out.balance = balance;
     }, {
         headed: process.env.HEADED === '1',
         recipe: context.recipePath,
@@ -170,7 +120,7 @@ export async function runAction(
         recipeUrl: URL,
         inputTask: context.inputTask,
         inputUrl: context.inputUrl,
-        parameters,
+        parameters: context.parameters,
     });
 }
 `;

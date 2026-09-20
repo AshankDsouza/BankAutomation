@@ -30,6 +30,23 @@ The through-line to keep in mind:
 The model discovers. The artifact becomes a reusable capability. Deterministic replay is
 how the AI agent invokes it in production.
 
+## Request flow
+
+Each request moves through the following layers:
+
+1. **Allowed-list screening** — the model maps the natural-language request to an
+   entry in `allowed.txt`. Requests that cannot be matched confidently require human
+   review.
+2. **Recipe mapping** — request parameters are extracted and the matching recipe is
+   selected by allowed action and website, so equivalent requests reuse one recipe.
+3. **Recipe making** — if no cached recipe exists, discovery sees the allowed action
+   rather than the individual request. Information-retrieval recipes collect the full
+   related context needed to serve different requests for that action.
+4. **Recipe execution** — the cached recipe replays deterministically and returns the
+   extracted context.
+5. **User request processing** — for information retrieval, the original request and
+   recipe result are supplied to the model to produce the concise user-facing answer.
+
 ## Runtime logging
 
 Replay/discovery logs are emitted as JSON lines on stderr with levels:

@@ -6,6 +6,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { BrowserSession } from './browser.ts';
 import { browserTools } from './tools.ts';
 import { generateRecipe } from './codegen.ts';
+import { escalateToHuman, HumanEscalationError } from './escalation.ts';
 
 const CONFIDENCE_SCORE_THRESHOLD = 0.85;
 
@@ -36,7 +37,7 @@ function getLimits(): DiscoveryLimits {
         maxIterations: readPositiveIntEnv('DISCOVERY_MAX_ITERATIONS', 20),
         maxResponseTokens: readPositiveIntEnv('DISCOVERY_MAX_RESPONSE_TOKENS', 4000),
         maxSteps: readPositiveIntEnv('DISCOVERY_MAX_STEPS', 20),
-        maxTotalTokens: readPositiveIntEnv('DISCOVERY_MAX_TOTAL_TOKENS', 50000),
+        maxTotalTokens: readPositiveIntEnv('DISCOVERY_MAX_TOTAL_TOKENS', 100000),
         timeoutMs: readPositiveIntEnv('DISCOVERY_TIMEOUT_MS', 120000),
     };
 }
@@ -169,6 +170,7 @@ async function discoverRecipe(URL: string, task: string, allowedAction: string, 
         maxRecordedSteps: limits.maxSteps,
     });
     let recipeSource = '';
+    let escalatedDuringDiscovery = false;
 
     try {
         await session.start(URL);
@@ -187,12 +189,13 @@ async function discoverRecipe(URL: string, task: string, allowedAction: string, 
                 "Refs change after every navigation, so take a fresh snapshot after each click. " +
                 "When you have located the information the task asks for, call extract on the element " +
                 "holding the value, then stop and state the value. " +
+                "If you don't have enough information to proceed with any step then escalate to the human operator using escalateToHuman(). " +
                 "Do not write any code -- the steps you take are recorded automatically.",
             tools: browserTools(session, { maxToolCalls: limits.maxSteps }),
             messages: [
                 {
                     role: "user",
-                    content: `Website: ${URL}\nTask: ${task}`,
+                    content: `Website: ${URL}\nTask: ${allowedAction}`,
                 },
             ],
         }, {
@@ -205,6 +208,7 @@ async function discoverRecipe(URL: string, task: string, allowedAction: string, 
                 abortController.abort(new Error(`Discovery token budget exceeded (${totalTokens}/${limits.maxTotalTokens}).`));
                 throw new Error(`Discovery token budget exceeded (${totalTokens}/${limits.maxTotalTokens}).`);
             }
+            console.log(message);
         }
 
         if (session.steps.length === 0) {
@@ -214,16 +218,35 @@ async function discoverRecipe(URL: string, task: string, allowedAction: string, 
             throw new Error("Claude finished without extracting the requested value.");
         }
 
-        recipeSource = generateRecipe(URL, task, allowedAction, parameters, session.steps);
+        recipeSource = generateRecipe(URL, allowedAction, allowedAction, parameters, session.steps);
     } catch (error) {
-        if (abortController.signal.aborted) {
-            const reason = abortController.signal.reason;
-            throw reason instanceof Error ? reason : new Error(String(reason));
-        }
-        throw error;
+        escalatedDuringDiscovery = true;
+        const reason = abortController.signal.aborted
+            ? abortController.signal.reason
+            : error;
+        const reasonMessage = reason instanceof Error ? reason.message : String(reason);
+
+        // The agent got stuck and can't resolve this on its own: leave the
+        // live browser session open (session.close() is deferred to
+        // onRelease, invoked only after the human operator lets go) so a
+        // human operator can take over from exactly where discovery left off.
+        await escalateToHuman({
+            reason: `Recipe discovery could not complete automatically: ${reasonMessage}`,
+            task,
+            url: URL,
+            allowedAction,
+            parameters,
+            collectedInfo: { steps: session.steps },
+            sessionKeptAlive: true,
+            onRelease: async () => {
+                await session.close();
+            },
+        });
     } finally {
         clearTimeout(timeout);
-        await session.close();
+        if (!escalatedDuringDiscovery) {
+            await session.close();
+        }
     }
 
     return createRecipe(URL, allowedAction, recipeSource);
@@ -244,6 +267,7 @@ interface IConfidenceResponse {
     action: string | null;
     confidence: number;
     parameters: TaskParameters;
+    isInformationRetrieval: boolean;
 }
 
 function normalizeTaskText(value: string): string {
@@ -256,28 +280,22 @@ function isTaskParameters(value: unknown): value is TaskParameters {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isRecipeResult(value: unknown): value is Record<string, string> {
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value) &&
+        Object.values(value).every((entry) => typeof entry === 'string')
+    );
+}
+
 async function classifyTask(task: string): Promise<IConfidenceResponse> {
     const allowedList = fs
         .readFileSync('allowed.txt', 'utf8')
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter((line) => line.length > 0);
-    const normalizedTask = normalizeTaskText(task);
     const normalizedAllowed = allowedList.map(normalizeTaskText);
-
-    const directMatch = allowedList.find(
-        (allowedTask) => {
-            const normalizedAllowedTask = normalizeTaskText(allowedTask);
-            return (
-                normalizedTask === normalizedAllowedTask ||
-                normalizedTask.includes(normalizedAllowedTask) ||
-                normalizedAllowedTask.includes(normalizedTask)
-            );
-        },
-    );
-    if (directMatch) {
-        return { action: directMatch, confidence: 1, parameters: {} };
-    }
 
     const checkIsAllowedPrompt = `You are a task classifier.
 
@@ -297,6 +315,7 @@ Rules:
 - Confidence represents your confidence that the classification is correct, not how similar the wording is.
 - Parameters must be an object containing only values explicitly provided by the user and needed to perform the selected action.
 - Use an empty object when the request provides no action parameters.
+- Set isInformationRetrieval to true only when the selected action retrieves information for the user to read.
 - Return JSON only.
 
 Output format:
@@ -304,7 +323,8 @@ Return a JSON object with exactly these keys:
 {
   "action": "<matched allowed task text or null>",
   "confidence": <number between 0 and 1>,
-  "parameters": { "<parameter name>": "<parameter value>" }
+  "parameters": { "<parameter name>": "<parameter value>" },
+  "isInformationRetrieval": <boolean>
 }`;
 
     const response = await client.messages.create({
@@ -325,7 +345,7 @@ Return a JSON object with exactly these keys:
     }
 
     let parsed: IConfidenceResponse;
-    const raw = textBlock.text.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '');
+    const raw = stripCodeFence(textBlock.text);
     try {
         parsed = JSON.parse(raw) as IConfidenceResponse;
     } catch (error) {
@@ -351,6 +371,10 @@ Return a JSON object with exactly these keys:
         throw new Error('Task classifier response action must be a string or null.');
     }
 
+    if (typeof parsed.isInformationRetrieval !== 'boolean') {
+        throw new Error('Task classifier response must contain an isInformationRetrieval boolean.');
+    }
+
     if (parsed.action === null) {
         return parsed;
     }
@@ -358,10 +382,43 @@ Return a JSON object with exactly these keys:
     const normalizedAction = normalizeTaskText(parsed.action);
     const actionMatchesAllowed = normalizedAllowed.some((allowedTask) => allowedTask === normalizedAction);
     if (!actionMatchesAllowed) {
-        return { action: null, confidence: parsed.confidence, parameters: parsed.parameters };
+        return {
+            action: null,
+            confidence: parsed.confidence,
+            parameters: parsed.parameters,
+            isInformationRetrieval: parsed.isInformationRetrieval,
+        };
     }
 
     return parsed;
+}
+
+async function processUserRequest(task: string, result: Record<string, string>): Promise<string> {
+    console.log(`Processing user request: ${task}`);
+    console.log(`Recipe result: ${JSON.stringify(result, null, 2)}`);
+    const response = await client.messages.create({
+        model: 'claude-opus-5',
+        max_tokens: 300,
+        thinking: { type: 'disabled' },
+        messages: [
+            {
+                role: 'user',
+                content: `Answer this user request using the context provided.
+
+User request: ${JSON.stringify(task)}
+
+Recipe result:
+${JSON.stringify(result, null, 2)}
+
+Return only the concise answer for the user. Do not mention unrelated information, context, or unavailable information.`,
+            },
+        ],
+    });
+    const text = extractText(response.content);
+    if (!text) {
+        throw new Error('User request processing returned no text output.');
+    }
+    return text;
 }
 
 // This is the "main" function that will be called to execute the recipe
@@ -371,13 +428,24 @@ async function executeRecipe(url: string, task: string): Promise<void> {
     const allowedResponse: IConfidenceResponse = await classifyTask(task);
 
     if (allowedResponse.action === null || allowedResponse.confidence < CONFIDENCE_SCORE_THRESHOLD) {
-        console.error(`Task "${task}" is not allowed. Confidence: ${allowedResponse.confidence}`);
-        throw new Error(`Task "${task}" is not allowed. Confidence: ${allowedResponse.confidence}`);
+        // No browser session exists yet at this point (screening happens
+        // before discovery), so there is nothing to keep alive here.
+        await escalateToHuman({
+            reason: allowedResponse.action === null
+                ? `Task "${task}" did not match any allowed action.`
+                : `Task "${task}" matched "${allowedResponse.action}" but confidence ${allowedResponse.confidence} is below the ${CONFIDENCE_SCORE_THRESHOLD} threshold.`,
+            task,
+            url,
+            allowedAction: allowedResponse.action,
+            confidence: allowedResponse.confidence,
+            parameters: allowedResponse.parameters,
+            sessionKeptAlive: false,
+        });
     }
 
-    configureRunLogFile(allowedResponse.action);
+    configureRunLogFile(allowedResponse.action!);
 
-    let recipePath: string = await discoverRecipe(url, task, allowedResponse.action, allowedResponse.parameters);
+    let recipePath: string = await discoverRecipe(url, task, allowedResponse.action!, allowedResponse.parameters);
 
     // A bare relative path is treated as a package name by import(), so resolve
     // it to an absolute file:// URL first.
@@ -387,26 +455,31 @@ async function executeRecipe(url: string, task: string): Promise<void> {
         throw new Error(`${recipePath} does not export a runAction() function`);
     }
 
-    const result = await recipe.runAction({
+    const result: unknown = await recipe.runAction({
         recipePath,
         inputTask: task,
         inputUrl: url,
         parameters: allowedResponse.parameters,
     });
+    if (!isRecipeResult(result)) {
+        throw new Error(`${recipePath} returned an invalid recipe result.`);
+    }
+
     const entries = Object.entries(result);
     if (entries.length === 0) {
         throw new Error(`${recipePath} completed without extracting any values.`);
     }
 
-    if (entries.length === 1) {
-        console.log(entries[0][1]);
-    } else {
-        console.log(entries.map(([key, value]) => `${key}: ${value}`).join('\n'));
+    if (entries.some(([, value]) => value.trim().length === 0)) {
+        throw new Error(`${recipePath} completed with an empty extracted value.`);
     }
 
-    return;
+    if (allowedResponse.isInformationRetrieval) {
+        console.log(await processUserRequest(task, result));
+        return;
+    }
 
-
+    console.log(entries.length === 1 ? entries[0][1] : entries.map(([key, value]) => `${key}: ${value}`).join('\n'));
 }
 
 
@@ -418,6 +491,13 @@ if (!url || !task) {
 }
 
 executeRecipe(url, task).catch((err) => {
+    if (err instanceof HumanEscalationError) {
+        console.error(`\nEscalated to a human agent: ${err.context.reason}`);
+        if (err.context.sessionKeptAlive) {
+            console.error('The browser session has been left open for a human operator to take over.');
+        }
+        process.exit(2);
+    }
     console.error(err);
     process.exit(1);
 });

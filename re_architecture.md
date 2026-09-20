@@ -51,3 +51,8 @@ I am proposing the following layers:
     |
     |
     ----> User Request Processing Layer: In this layer, if user request is the retrievel of information we take the response from the recipe and give to the LLM along with the original user request and allow the LLM to generate the final response for the user.
+    |
+    |
+    ----> Human Escalation Layer: In this layer, if we cross any thresholds for automated handling or encounter situations that the AI agent cannot resolve, the request will be escalated to a human agent for further processing. We will keep the browser session active to allow the human agent to continue from where the AI agent left off( it should not
+close the browser. the browser should remain open and the human agent takes over
+the same session.). Also, we will notify the human agent of the context and any relevant information collected by the AI agent by calling a empty (for now) placeholder function called notifyHumanAgent(context).
