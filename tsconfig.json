@@ -8,5 +8,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["*.ts", "recipes/**/*.ts"]
+  "include": ["*.ts", "layers/**/*.ts", "recipes/**/*.ts"]
 }

@@ -1,0 +1,14 @@
+
+=== HUMAN ESCALATION ===
+  "reason": "Task \"please wire 10000 dollars to an offshore account\" did not match any allowed action.",
+  "task": "please wire 10000 dollars to an offshore account",
+  "url": "https://www.ngpf.org/bank-sim/",
+  "allowedAction": null,
+  "confidence": 0.96,
+  "parameters": {},
+  "sessionKeptAlive": false
+}
+=========================
+
+
+Escalated to a human agent: Task "please wire 10000 dollars to an offshore account" did not match any allowed action.

@@ -30,22 +30,77 @@ The through-line to keep in mind:
 The model discovers. The artifact becomes a reusable capability. Deterministic replay is
 how the AI agent invokes it in production.
 
+## Setup
+
+Requirements: Node.js 20+.
+
+```bash
+npm install
+npx playwright install chromium
+```
+
+Create a `.env` file in the repo root with Anthropic credentials (either works):
+```
+ANTHROPIC_API_KEY=sk-ant-...
+# or, if you use `ant auth login` locally, ANTHROPIC_AUTH_TOKEN=...
+```
+`.env` is loaded automatically by `llmClient.ts`/`env.ts`; it is git-ignored.
+
+## Demo path
+
+Run the agent on a goal (discovers + caches a recipe on first run, then executes it):
+```bash
+npx tsx Discovery.ts "https://www.ngpf.org/bank-sim/" "tell me my total balance"
+```
+This prints the final answer (e.g. `Your total balance is $446.04 — ...`) and writes a
+cached recipe under `recipes/` plus a JSON-line log under `logs/`.
+
+Replay the exact same artifact deterministically (no LLM discovery, since the recipe now
+exists) by running the same command again, or any phrasing that maps to the same allowed
+action, e.g.:
+```bash
+npx tsx Discovery.ts "https://www.ngpf.org/bank-sim/" "what is my savings balance?"
+```
+
+Set `HEADED=1` to watch the browser during either run:
+```bash
+HEADED=1 npx tsx Discovery.ts "https://www.ngpf.org/bank-sim/" "tell me my total balance"
+```
+
+`bash test_bank_recipe.sh` wraps one of the above commands for convenience (loads `.env`,
+defaults `HEADED=1`).
+
+See `/evidence/` for saved logs and artifacts from real discovery, replay, and
+human-escalation runs, and `/REPORT.md` for the architecture write-up.
+
 ## Request flow
 
-Each request moves through the following layers:
+Each request moves through the following layers (each implemented as its own file under
+`layers/`):
 
-1. **Allowed-list screening** — the model maps the natural-language request to an
-   entry in `allowed.txt`. Requests that cannot be matched confidently require human
-   review.
-2. **Recipe mapping** — request parameters are extracted and the matching recipe is
-   selected by allowed action and website, so equivalent requests reuse one recipe.
-3. **Recipe making** — if no cached recipe exists, discovery sees the allowed action
-   rather than the individual request. Information-retrieval recipes collect the full
-   related context needed to serve different requests for that action.
-4. **Recipe execution** — the cached recipe replays deterministically and returns the
-   extracted context.
-5. **User request processing** — for information retrieval, the original request and
-   recipe result are supplied to the model to produce the concise user-facing answer.
+1. **Allowed-list screening** (`layers/allowedListScreening.ts`) — the model maps the
+   natural-language request to an entry in `allowed.txt`. Requests that cannot be matched
+   confidently escalate to a human (`layers/escalation.ts`) instead of proceeding.
+2. **Recipe mapping** (`layers/recipeMapping.ts`) — request parameters are extracted and
+   the matching recipe is selected by allowed action and website, so equivalent requests
+   reuse one recipe.
+3. **Recipe making** (`layers/recipeMaking.ts`) — if no cached recipe exists, discovery
+   sees the allowed action rather than the individual request. Information-retrieval
+   recipes collect the full related context needed to serve different requests for that
+   action. If discovery gets stuck, it escalates to a human with the live browser session
+   left open.
+4. **Recipe execution** (`layers/recipeExecution.ts`) — the cached recipe replays
+   deterministically and returns the extracted context.
+5. **User request processing** (`layers/userRequestProcessing.ts`) — for information
+   retrieval, the original request and recipe result are supplied to the model to produce
+   the concise user-facing answer.
+6. **Human escalation** (`layers/escalation.ts`) — reached from layers 1 and 3. Notifies a
+   human operator with full context and, if a browser session exists, keeps it open until
+   the operator releases it (Ctrl+C), rather than closing it out from under them.
+
+`Discovery.ts` is the CLI entrypoint that wires these layers together; `env.ts`,
+`llmClient.ts`, and `taskTypes.ts` are small shared infrastructure used across layers.
+
 
 ## Runtime logging
 

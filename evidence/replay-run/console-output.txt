@@ -1,0 +1,6 @@
+Processing user request: tell me my total balance
+Recipe result: {
+  "savings_balance": "$230.00",
+  "checking_balance": "$216.04"
+}
+Your total balance is $446.04 — $230.00 in savings and $216.04 in checking.
