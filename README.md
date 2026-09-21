@@ -3,6 +3,7 @@
 Goal: Look up https://www.ngpf.org/bank-sim/
 and look up their current savings account balance. 
 
+demo video: https://www.loom.com/share/060cf230fd90454281af74d0e2ad425a
 
 
 Build a system that can:
