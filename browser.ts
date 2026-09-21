@@ -2,6 +2,7 @@ import { chromium } from 'playwright';
 import type { Browser, Page, Locator } from 'playwright';
 import { PlaywrightCommandLogger } from './logger.ts';
 import type { PlaywrightLogMetadata } from './logger.ts';
+import { assertDomainAllowed } from './safety.ts';
 
 /**
  * A durable way to find one element, independent of where it currently sits on
@@ -93,6 +94,7 @@ export class BrowserSession {
     }
 
     async goto(url: string): Promise<string> {
+        assertDomainAllowed(url, 'discovery');
         await this.logger.run(
             'page.goto',
             async () => this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }),

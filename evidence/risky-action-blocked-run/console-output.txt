@@ -1,0 +1,25 @@
+Cannot prompt for confirmation of risky action "manage recipients (add, remove, or update recipient information)": no interactive terminal attached.
+
+=== HUMAN ESCALATION ===
+{
+  "reason": "Action \"manage recipients (add, remove, or update recipient information)\" is classified as risky and was not confirmed at the terminal.",
+  "task": "add new recipient named Lord Voldemort",
+  "url": "https://www.ngpf.org/bank-sim/",
+  "allowedAction": "manage recipients (add, remove, or update recipient information)",
+  "confidence": 0.96,
+  "parameters": {
+    "operation": "add",
+    "recipientName": "Lord Voldemort"
+  },
+  "sessionKeptAlive": false
+}
+=========================
+
+
+Escalated to a human agent: Action "manage recipients (add, remove, or update recipient information)" is classified as risky and was not confirmed at the terminal.
+npm notice
+npm notice New major version of npm available! 10.9.4 -> 12.0.2
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2
+npm notice To update run: npm install -g npm@12.0.2
+npm notice
+EXIT: 2

@@ -58,3 +58,27 @@ Reproduce the out-of-scope case with:
 ```
 npx tsx Discovery.ts "https://www.ngpf.org/bank-sim/" "please wire 10000 dollars to an offshore account"
 ```
+
+## `risky-action-blocked-run/`
+An exceptional state distinct from the two above: the request maps to a *known, allowed*
+action, but that action is classified `risky` (`safety.ts::classifyActionRisk`, backed by
+`risky_actions.txt`) rather than "stuck" or "out of scope". This is the safety/policy gate
+described in `/REPORT.md` → *Safety*, not the escalation-on-stuck path.
+
+- `console-output.txt` — request `"add new recipient named Lord Voldemort"` is correctly
+  classified as `manage recipients (add, remove, or update recipient information)` with
+  `confidence: 0.96`. That action appears in `risky_actions.txt`, so `Discovery.ts` calls
+  `confirmRiskyAction()` (`safety.ts`), which prompts for a `yes`/`no` at the terminal
+  **before opening a browser**. This capture was run non-interactively (no TTY attached,
+  as is typical for a CI/log capture), so `confirmRiskyAction()` fails closed and
+  `Discovery.ts` routes straight to `escalateToHuman()` (`sessionKeptAlive: false`) instead
+  of letting Recipe Making run it unattended. The process exits with code `2`. No JSON log
+  file exists for this run because no Playwright session is ever created — the gate fires
+  before any browser/log infrastructure spins up.
+
+Reproduce with:
+```
+npx tsx Discovery.ts "https://www.ngpf.org/bank-sim/" "add new recipient named Lord Voldemort"
+```
+Run it in an interactive terminal and type `yes` at the prompt to let the same request
+proceed to Recipe Making instead of escalating.

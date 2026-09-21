@@ -90,7 +90,11 @@ Each request moves through the following layers (each implemented as its own fil
    action. If discovery gets stuck, it escalates to a human with the live browser session
    left open.
 4. **Recipe execution** (`layers/recipeExecution.ts`) — the cached recipe replays
-   deterministically and returns the extracted context.
+   deterministically and returns an `ExecutionOutcome`: either the extracted context on
+   success, or a known `business_outcome` (e.g. an unsupported account type) passed
+   straight through to the caller instead of being treated as a crash. A hard failure
+   during replay (a checkpoint that never resolves, a selector that never matches) also
+   escalates to a human with the live browser kept open, the same as a stuck discovery run.
 5. **User request processing** (`layers/userRequestProcessing.ts`) — for information
    retrieval, the original request and recipe result are supplied to the model to produce
    the concise user-facing answer.
@@ -101,6 +105,30 @@ Each request moves through the following layers (each implemented as its own fil
 `Discovery.ts` is the CLI entrypoint that wires these layers together; `env.ts`,
 `llmClient.ts`, and `taskTypes.ts` are small shared infrastructure used across layers.
 
+## Safety guardrails
+
+`safety.ts` enforces two independent, configurable checks before/around every request:
+
+- **Domain allowlist** (`allowed_domains.txt`, one hostname per line) — enforced at the
+  Playwright navigation seam itself (`browser.ts::goto` for discovery,
+  `recipeRuntime.ts::recipeGoto` for replay), so it can't be bypassed by a hallucinated
+  task or a hand-edited recipe. Add a hostname there to permit automation against it.
+- **Risky vs. safe action classification** (`risky_actions.txt`) — `Discovery.ts` checks
+  `classifyActionRisk(action)` right after AllowedListScreening, before any browser opens.
+  Actions listed in `risky_actions.txt` (currently `create a type of bank account` and
+  `manage recipients (...)`) prompt for an explicit `yes`/`no` confirmation typed at the
+  terminal before running unattended; typing anything other than `yes`, or running
+  non-interactively (no TTY on stdin/stdout — e.g. in CI or piped output), escalates to a
+  human instead. Anything *not* listed in `risky_actions.txt` defaults to `risky` unless it
+  starts with `retrieve` (read-only actions are assumed safe) — a fail-closed heuristic for
+  any new allowed action. See `evidence/risky-action-blocked-run/` for a captured example.
+
+Replay also reports a three-way result instead of just success/throw
+(`recipeRuntime.ts`'s `RecipeOutcome`): `success` (with outputs), a known
+`business_outcome` (e.g. an unsupported account type — a legitimate answer, not a crash),
+or a `failure` with the step/expected/observed detail needed to debug it. Recipes assert an
+explicit checkpoint (`recipeCheckpoint()`) after key navigation steps to confirm the
+expected state was actually reached, rather than assuming a click worked.
 
 ## Runtime logging
 

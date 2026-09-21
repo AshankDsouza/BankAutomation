@@ -1,0 +1,6 @@
+# Allowed actions (see allowed.txt) that are risky/irreversible and therefore
+# require explicit confirmation (CONFIRM_RISKY_ACTIONS=1) before automation is
+# allowed to run them. Anything not listed here that also doesn't start with
+# "retrieve" is treated as risky by default (see safety.ts::classifyActionRisk).
+create a type of bank account
+manage recipients (add, remove, or update recipient information)

@@ -65,8 +65,12 @@ export async function runAction(context: {
   inputTask?: string;
   inputUrl?: string;
   parameters?: Record<string, unknown>;
-}): Promise<Record<string, string>>
+  onHardFailure?: (info: HardFailureInfo, closeBrowser: () => Promise<void>) => Promise<void>;
+}): Promise<RecipeOutcome>
 ```
+(`RecipeOutcome` is the three-way success/business_outcome/failure result contract —
+see §3. `onHardFailure` is how the caller, not the recipe, decides whether a hard failure
+keeps the browser session alive for human escalation.)
 
 `runAction` is implemented in terms of a small typed step vocabulary shared with the
 discovery-time recorder (`browser.ts`):
@@ -115,9 +119,13 @@ Replay never calls the LLM. `runAction()` is plain Playwright driven by the type
 2. Requires the resolved locator to match **exactly one** element (`locator.count() === 1`)
    before acting — ambiguous matches are treated as a failure, not silently resolved to
    "first match", so a recipe never silently clicks the wrong element after a DOM change.
-3. Throws a descriptive error (`No selector matched for "<description>"`) if nothing
-   resolves, which propagates up through `executeCachedRecipe` (`layers/recipeExecution.ts`)
-   as a hard failure rather than a false "success".
+3. Retries up to `RESOLVE_RETRY_ATTEMPTS` (2) times, `RESOLVE_RETRY_DELAY_MS` (1s) apart,
+   logging a `WARN` `resolve.retry` event each time, if nothing resolves on the first try
+   (see §3 below for why: a transient load is recoverable, not a hard failure).
+4. Throws `HardFailureError` (a descriptive "No selector matched for..." message, plus the
+   step/expected/observed detail) once retries are exhausted, which propagates up through
+   `executeCachedRecipe` (`layers/recipeExecution.ts`) as a hard failure rather than a false
+   "success".
 
 `executeCachedRecipe` additionally treats a run as failed (not just "recipe threw") if:
 - `runAction()` doesn't return an object of `Record<string, string>`,
@@ -126,6 +134,42 @@ Replay never calls the LLM. `runAction()` is plain Playwright driven by the type
 
 This directly implements the spec's example: a `null`/blank saving-balance extraction is
 never reported as success.
+
+**Result contract (`RecipeOutcome`, `recipeRuntime.ts`).** `runAction()` returns a
+discriminated union rather than a bare `Record<string, string>`:
+```ts
+type RecipeOutcome =
+  | { kind: 'success'; outputs: Record<string, string> }
+  | { kind: 'business_outcome'; code: string; message: string; details?: unknown }
+  | { kind: 'failure'; message: string; step?: string; expected?: string; observed?: string };
+```
+This is the direct implementation of the spec's "business outcome vs. recoverable vs. hard
+failure" distinction (§3.3):
+- **Business outcome** — a recipe calls the `businessOutcome(code, message, details?)`
+  helper for a legitimate non-crash result the caller needs to know about. Example:
+  `buildBankBalanceRecipe`'s `requestedAccounts()` returns `unsupported_account_type`
+  instead of throwing if a caller asks for an account type the recipe doesn't handle.
+  `layers/recipeExecution.ts` passes this straight through to `Discovery.ts`, which logs
+  the message and exits cleanly — not treated as a failure.
+- **Recoverable condition** — `resolve()` (used by `recipeClick`/`recipeFill`/
+  `recipeExtract`) retries a selector resolution up to `RESOLVE_RETRY_ATTEMPTS` (2) times,
+  `RESOLVE_RETRY_DELAY_MS` (1s) apart, logging a `WARN`-level `resolve.retry` event each
+  time, before giving up. This covers the "transient slowness/dismiss a known interstitial"
+  case without escalating for something that resolves itself a second later.
+- **Hard failure** — if retries are exhausted, `resolve()` throws `HardFailureError`
+  (carrying `step`/`expected`/`observed`). `runRecipe()`'s options include an optional
+  `onHardFailure(info, closeBrowser)` callback instead of closing the browser itself in
+  this case — `layers/recipeExecution.ts` supplies one that calls `escalateToHuman({
+  sessionKeptAlive: true, onRelease: closeBrowser })`, so a hard failure *during replay*
+  gets the same live-session human handoff as a stuck *discovery* run (see §5) instead of
+  just crashing the process.
+
+**Explicit checkpoint.** `recipeCheckpoint(page, selectors, description)` is a separate
+primitive from `resolve()`: `resolve()` finds a target to act on, `recipeCheckpoint()`
+asserts a *state* was reached (e.g., after clicking "GET STARTED NOW", that the dashboard
+actually shows "Saving Account Activity" or "Checking Account Activity" before the recipe
+trusts any balance extraction that follows). This is the spec's checkpoint requirement:
+confirming a click worked rather than assuming it did.
 
 Every Playwright command (discovery *and* replay) is wrapped by `PlaywrightCommandLogger`
 (`logger.ts`), which logs, per command: a monotonic step number, the command name, the
@@ -179,6 +223,21 @@ The design already separates three concerns that heterogeneity requires keeping 
    `discoverRecipe()` calls `escalateToHuman({ ..., sessionKeptAlive: true, onRelease: () =>
    session.close() })` — critically, it does **not** call `session.close()` itself.
    Evidence: `evidence/escalation-run/discovery-stuck-and-escalated.log`.
+3. **A risky action is requested.** Even before the request reaches Recipe Making,
+   `Discovery.ts` checks `classifyActionRisk(action)` (`safety.ts`) right after
+   AllowedListScreening succeeds. If the matched action is risky (listed in
+   `risky_actions.txt`, or not explicitly marked `safe` by the read-only heuristic),
+   `confirmRiskyAction()` prompts for an explicit `yes`/`no` at the terminal (`safety.ts`,
+   via `node:readline/promises`); a `no`, anything else, or no interactive TTY on
+   stdin/stdout (e.g. CI, piped output — nothing there to prompt) escalates immediately —
+   before any browser opens (`sessionKeptAlive: false`), since there's nothing yet to hand
+   off. This is a *policy* escalation, distinct from cases 1–2 which are both "the system
+   got stuck". Evidence: `evidence/risky-action-blocked-run/console-output.txt`.
+4. **A replay-time hard failure.** `layers/recipeExecution.ts`'s `onHardFailure` callback
+   (see §3) routes a hard failure encountered *during deterministic replay* — not just
+   discovery — through the same `escalateToHuman({ sessionKeptAlive: true, onRelease:
+   closeBrowser })` path, so a replay that hits an unresolvable selector or a failed
+   checkpoint also hands the live session to a human instead of just throwing.
 
 `escalateToHuman()` (`layers/escalation.ts`) always calls a `notifyHumanAgent(context)`
 placeholder first — logging the reason, task, URL, matched action, confidence, parameters,
@@ -207,6 +266,22 @@ completes the task is not yet fed back into recipe-making as a new branch (see �
   string, `classifyTask()` re-checks it against a normalized version of `allowed.txt` server
   side (`normalizeTaskText` + exact match) and forces it to `null` if it doesn't match a
   real entry — a hallucinated or paraphrased "allowed" action is rejected, not trusted.
+- **Domain allowlist enforced at the navigation seam, not the prompt.** `safety.ts`'s
+  `assertDomainAllowed(url, context)` reads `allowed_domains.txt` and is called from inside
+  `browser.ts::goto` (discovery) and `recipeRuntime.ts::recipeGoto` (replay) — the one
+  place all navigation must pass through, in both phases. A hallucinated URL, a bad
+  parameter, or a hand-edited recipe pointing somewhere else all get refused the same way;
+  there's no way to reach a disallowed host without editing `allowed_domains.txt` itself.
+- **Risky vs. safe/reversible action classification, handled conservatively.**
+  `safety.ts::classifyActionRisk` marks an allowed action `risky` if it's explicitly listed
+  in `risky_actions.txt` (currently the two mutating actions: creating an account, managing
+  recipients), or — for any action not explicitly classified — if it doesn't start with
+  `retrieve` (the read-only heuristic). `Discovery.ts` requires an explicit `yes`
+  confirmation typed at the terminal (`safety.ts::confirmRiskyAction`) before running a
+  risky action unattended; anything else — a `no`, an unrelated answer, or no interactive
+  TTY attached at all — escalates to a human before a browser opens. The default is
+  fail-closed: an unrecognized new allowed action is treated as risky, not safe, until
+  someone decides otherwise. See `evidence/risky-action-blocked-run/`.
 - **Regulated data minimization by design, not by prompt.** `allowed.txt`'s balance-retrieval
   entry explicitly excludes "account numbers or passwords", and the bank-balance recipe
   template (`layers/recipeMaking.ts::buildBankBalanceRecipe`) only ever extracts balance
@@ -218,15 +293,20 @@ completes the task is not yet fed back into recipe-making as a new branch (see �
   to stop (and, per §5, escalate) rather than loop indefinitely against a live financial
   site.
 - **Result validation before anything is reported as done.** See §3 — empty/blank/malformed
-  results are treated as failures, not silently reported as success, which limits the blast
-  radius of a confidently-wrong extraction.
+  results are treated as failures, and a recipe can report a legitimate `business_outcome`
+  instead of either silently succeeding or crashing.
 
-**Limits:** the guardrail is a flat English string-match allowlist, not a formal policy
+**Limits:** the action allowlist is a flat English string-match, not a formal policy
 engine — it can't express constraints like "read-only for account X but not Y", per-user
-authorization, or rate limits. Logs currently capture full DOM snapshots
+authorization, or rate limits. The domain allowlist and risky-action list are similarly flat
+text files, not a structured policy language. The terminal confirmation
+(`confirmRiskyAction`) is a real, synchronous yes/no prompt — not a mocked flag — but it's
+still a minimal surface: no reason/audit trail is captured beyond the escalation log, and
+it only works for a single operator sitting at the same terminal as the CLI process (not a
+remote reviewer). Logs currently capture full DOM snapshots
 (`logger.ts::snapshotPreview`), which is useful for debugging but is itself a place
 sensitive on-screen data (if ever present) could leak into `logs/`; there's no redaction
-pass on log content today.
+pass on log content today (see §7).
 
 ## 7. Cuts
 
@@ -234,9 +314,10 @@ Deliberately left out, given time constraints:
 - **Real human-notification integration.** `notifyHumanAgent()` only logs to the console;
   there's no Slack/PagerDuty/ticket-queue wiring, though the call site and payload shape are
   already in place.
-- **Recipe versioning/migration.** Recipes are overwritten in place by filename; there's no
-  schema version field, no way to detect an artifact was generated by an older codegen
-  template, and no migration path if the `Step`/`Selector` schema changes.
+- **Recipe/artifact schema versioning.** Recipes are overwritten in place by filename;
+  there's no schema version field on the artifact itself, no way to detect an artifact was
+  generated by an older codegen template, and no migration path if the `Step`/`Selector` or
+  `RecipeOutcome` schema changes.
 - **Learning from a human takeover.** When a human completes a task Discovery escalated,
   that resolution isn't captured back into a new recipe branch, so the same class of
   request will escalate again next time (planning.md's "exceptional state handling" idea).
@@ -246,10 +327,14 @@ Deliberately left out, given time constraints:
   hostname, not an app-template identity (§4).
 - **Concurrency/session pooling.** One browser per request; no shared pool or queueing for
   concurrent discovery runs.
-- **Log redaction.** DOM-snapshot-based logs are useful for debugging (§3) but are not
-  scrubbed for sensitive substrings before being written to `logs/`.
+- **Log/secret redaction.** DOM-snapshot-based logs are useful for debugging (§3) but are
+  not scrubbed for sensitive substrings (credentials, tokens, PII) before being written to
+  `logs/` or embedded in an artifact.
+- **Screenshot-on-failure.** Evidence today is JSON logs + DOM snapshots only; a real
+  screenshot capture on hard failure (in addition to the DOM snapshot) isn't wired in.
 
 What I'd build next, in priority order: (1) a real `notifyHumanAgent` integration + a way to
 record the human's resolution as a recipe variant, since that's the biggest lever on
-long-run automation coverage; (2) log redaction, since these are meant to be regulated
-financial flows; (3) an app-template-keyed recipe cache for true multi-tenant reuse.
+long-run automation coverage; (2) log/artifact redaction, since these are meant to be
+regulated financial flows; (3) an app-template-keyed recipe cache for true multi-tenant
+reuse.

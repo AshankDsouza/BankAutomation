@@ -174,6 +174,10 @@ export class PlaywrightCommandLogger {
         emit('INFO', event, { ...this.metadata, details });
     }
 
+    warn(event: string, details: Record<string, unknown> = {}): void {
+        emit('WARN', event, { ...this.metadata, details });
+    }
+
     debug(event: string, details: Record<string, unknown> = {}): void {
         emit('DEBUG', event, { ...this.metadata, details });
     }

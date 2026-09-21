@@ -10,6 +10,7 @@ import { discoverRecipe } from './layers/recipeMaking.ts';
 import { executeCachedRecipe } from './layers/recipeExecution.ts';
 import { processUserRequest } from './layers/userRequestProcessing.ts';
 import { escalateToHuman, HumanEscalationError } from './layers/escalation.ts';
+import { classifyActionRisk, confirmRiskyAction } from './safety.ts';
 
 // This is the "main" function that ties every layer together for one request.
 async function executeRecipe(url: string, task: string): Promise<void> {
@@ -32,11 +33,34 @@ async function executeRecipe(url: string, task: string): Promise<void> {
         });
     }
 
+    // Risky actions (see risky_actions.txt) require an explicit human
+    // confirmation, typed at the terminal, before any browser session is
+    // opened - not a pre-set flag that could be left on unattended.
+    if (classifyActionRisk(allowedResponse.action!) === 'risky' && !(await confirmRiskyAction(allowedResponse.action!, task))) {
+        await escalateToHuman({
+            reason: `Action "${allowedResponse.action}" is classified as risky and was not confirmed at the terminal.`,
+            task,
+            url,
+            allowedAction: allowedResponse.action,
+            confidence: allowedResponse.confidence,
+            parameters: allowedResponse.parameters,
+            sessionKeptAlive: false,
+        });
+    }
+
     configureRunLogFile(allowedResponse.action!);
 
-    const recipePath = await discoverRecipe(url, task, allowedResponse.action!, allowedResponse.parameters);
+    const recipePath = await discoverRecipe(url, allowedResponse.action!, allowedResponse.parameters);
 
-    const result = await executeCachedRecipe(recipePath, task, url, allowedResponse.parameters);
+    const outcome = await executeCachedRecipe(recipePath, task, url, allowedResponse.parameters);
+
+    if (outcome.kind === 'business_outcome') {
+        // A legitimate answer, not a crash: report it and exit cleanly.
+        console.log(outcome.message);
+        return;
+    }
+
+    const result = outcome.result;
 
     if (allowedResponse.isInformationRetrieval) {
         console.log(await processUserRequest(task, result));
@@ -46,6 +70,7 @@ async function executeRecipe(url: string, task: string): Promise<void> {
     const entries = Object.entries(result);
     console.log(entries.length === 1 ? entries[0][1] : entries.map(([key, value]) => `${key}: ${value}`).join('\n'));
 }
+
 
 
 const [, , url, task] = process.argv;
