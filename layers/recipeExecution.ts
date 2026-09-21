@@ -89,14 +89,14 @@ export async function executeCachedRecipe(
     }
 
     const result: RecipeResult = outcome.outputs;
-    const entries = Object.entries(result);
-    if (entries.length === 0) {
-        throw new Error(`${recipePath} completed without extracting any values.`);
-    }
+    // const entries = Object.entries(result);
+    // if (entries.length === 0) {
+    //     throw new Error(`${recipePath} completed without extracting any values.`);
+    // }
 
-    if (entries.some(([, value]) => value.trim().length === 0)) {
-        throw new Error(`${recipePath} completed with an empty extracted value.`);
-    }
+    // if (entries.some(([, value]) => value.trim().length === 0)) {
+    //     throw new Error(`${recipePath} completed with an empty extracted value.`);
+    // }
 
     return { kind: 'success', result };
 }

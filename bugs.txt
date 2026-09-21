@@ -1,0 +1,5 @@
+-1. after creating the recipe, the task is presumably completed successfully; please dont call the task again. This would execute the same task twice which might cause unintended side effects. - fixed
+-2. there is some issue with the parameter parsing: Error: Missing required parameter: recipientName. extracting the 
+ parameter should be done with the help of the LLM: by passing the recipe and the user request so that the LLM can extract the parameters intelligently according to what the recipe needs.  - fixed
+-3. there is known issue where the recipe generated contains a lot of "trial and error" that the LLM did in the discovery phase which is not needed and may cause side effects.  - not fixed
+-4. the task should work for plural recipients as well, not just singular ones. - not fixed

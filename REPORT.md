@@ -327,9 +327,6 @@ Deliberately left out, given time constraints:
   hostname, not an app-template identity (§4).
 - **Concurrency/session pooling.** One browser per request; no shared pool or queueing for
   concurrent discovery runs.
-- **Log/secret redaction.** DOM-snapshot-based logs are useful for debugging (§3) but are
-  not scrubbed for sensitive substrings (credentials, tokens, PII) before being written to
-  `logs/` or embedded in an artifact.
 - **Screenshot-on-failure.** Evidence today is JSON logs + DOM snapshots only; a real
   screenshot capture on hard failure (in addition to the DOM snapshot) isn't wired in.
 

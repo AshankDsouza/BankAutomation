@@ -9,6 +9,7 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { client } from '../llmClient.ts';
 import { BrowserSession } from '../browser.ts';
 import type { Step } from '../browser.ts';
@@ -54,8 +55,8 @@ function getLimits(): DiscoveryLimits {
         maxIterations: readPositiveIntEnv('DISCOVERY_MAX_ITERATIONS', 20),
         maxResponseTokens: readPositiveIntEnv('DISCOVERY_MAX_RESPONSE_TOKENS', 4000),
         maxSteps: readPositiveIntEnv('DISCOVERY_MAX_STEPS', 20),
-        maxTotalTokens: readPositiveIntEnv('DISCOVERY_MAX_TOTAL_TOKENS', 100000),
-        timeoutMs: readPositiveIntEnv('DISCOVERY_TIMEOUT_MS', 120000),
+        maxTotalTokens: readPositiveIntEnv('DISCOVERY_MAX_TOTAL_TOKENS', 150000),
+        timeoutMs: readPositiveIntEnv('DISCOVERY_TIMEOUT_MS', 320000),
     };
 }
 
@@ -71,12 +72,18 @@ function usedTokens(usage: {
         (usage.cache_read_input_tokens ?? 0);
 }
 
-export async function discoverRecipe(URL: string, allowedAction: string, parameters: TaskParameters): Promise<string> {
+export interface DiscoverRecipeResult {
+    path: string;
+    /** False when an existing cached recipe was reused instead of running discovery. */
+    created: boolean;
+}
+
+export async function discoverRecipe(URL: string, allowedAction: string, parameters: TaskParameters): Promise<DiscoverRecipeResult> {
 
     let recipePath: string = doesRecipeExist(allowedAction, URL);
 
     if (recipePath !== "") {
-        return recipePath;
+        return {path:recipePath, created: false};
     }
 
     const limits = getLimits();
@@ -113,7 +120,7 @@ export async function discoverRecipe(URL: string, allowedAction: string, paramet
                 "Call snapshot to see the page: it lists every visible element with a ref (e1, e2, ...). " +
                 "Act on elements by ref. Call screenshot only when the text snapshot is visually ambiguous. " +
                 "Refs change after every navigation, so take a fresh snapshot after each click. " +
-                "When you have located the information the task asks for, call extract on the element " +
+                "When doing a retrieval type of action, once you have located the information the task asks for, call extract on the element " +
                 "holding the value, then stop and state the value. " +
                 "If you don't have enough information to proceed with any step then escalate to the human operator using escalateToHuman(). " +
                 "Do not write any code -- the steps you take are recorded automatically.",
@@ -121,7 +128,7 @@ export async function discoverRecipe(URL: string, allowedAction: string, paramet
             messages: [
                 {
                     role: "user",
-                    content: `Website: ${URL}\nTask: ${allowedAction}`,
+                    content: `Website: ${URL}\nTask: ${allowedAction}\n Task Parameters: ${JSON.stringify(parameters)}`,
                 },
             ],
         }, {
@@ -140,11 +147,23 @@ export async function discoverRecipe(URL: string, allowedAction: string, paramet
         if (session.steps.length === 0) {
             throw new Error("Claude finished without performing any browser actions.");
         }
-        if (!session.steps.some((step) => step.action === 'extract')) {
-            throw new Error("Claude finished without extracting the requested value.");
-        }
+        // if (!session.steps.some((step) => step.action === 'extract')) {
+        //     throw new Error("Claude finished without extracting the requested value.");
+        // }
+        console.log({parameters});
 
         recipeSource = generateRecipe(URL, allowedAction, parameters, session.steps);
+
+        // The bank-balance template already reads directly from
+        // context.parameters (see buildBankBalanceRecipe) by design, so only
+        // the generic step-replay template needs this pass. Skip it entirely
+        // if discovery ran with no parameters -- there's nothing to
+        // parameterize and no reason to spend a model call.
+        if (Object.keys(parameters ?? {}).length > 0 && normalizeAction(allowedAction) !== normalizeAction(BANK_BALANCE_ACTION)) {
+            recipeSource = await parameterizeRecipeSource(recipeSource, parameters);
+        }
+
+
     } catch (error) {
         escalatedDuringDiscovery = true;
         const reason = abortController.signal.aborted
@@ -175,7 +194,7 @@ export async function discoverRecipe(URL: string, allowedAction: string, paramet
         }
     }
 
-    return createRecipe(URL, allowedAction, recipeSource);
+    return {path: createRecipe(URL, allowedAction, recipeSource), created: true};
 
 }
 
@@ -348,6 +367,124 @@ export async function runAction(
     });
 }
 `;
+}
+
+// --- Recipe parameterization (replaces hardcoded, discovery-time values
+// with references to context.parameters, so the recipe generalizes to other
+// inputs instead of only ever replaying the one value used during
+// discovery) ---
+
+/**
+ * Asks the LLM to rewrite a freshly generated recipe so any literal copied
+ * from the discovery-time parameters (e.g. a member ID typed into a form
+ * while discovering the flow) is replaced with a reference to
+ * `context.parameters` instead - so the cached recipe can be replayed with
+ * different parameter values rather than always re-entering whatever value
+ * happened to be used during the one discovery run that created it.
+ *
+ * This is model-authored code, so it is never trusted blindly: the
+ * rewritten source must still export the expected shape and must actually
+ * load without a syntax/structural error (checked via a real dynamic
+ * import, not just string matching) before it replaces the original. If it
+ * fails validation for any reason, the original, unparameterized-but-known-
+ * good recipeSource is used instead - a less reusable recipe beats a broken
+ * one.
+ */
+async function parameterizeRecipeSource(
+    recipeSource: string,
+    parameters: TaskParameters,
+): Promise<string> {
+    let rewritten: string;
+    try {
+        const response = await client.messages.create({
+            model: 'claude-opus-5',
+            max_tokens: 4000,
+            thinking: { type: 'disabled' },
+            messages: [
+                {
+                    role: 'user',
+                    content:
+                        'The text below is a generated TypeScript recipe file for a browser-automation replay ' +
+                        'system. It was produced from one discovery run against a live site, using these input ' +
+                        `parameters: ${JSON.stringify(parameters)}.\n\n` +
+                        'Some literal values inside the file (for example, the "value" argument passed to ' +
+                        'recipeFill) may be copies of these parameter values, hardcoded from that one run. ' +
+                        'Rewrite the file so every such literal is replaced with a reference to the parameter ' +
+                        'it came from, read off context.parameters (e.g. ' +
+                        'String(context.parameters?.memberId ?? "<original literal>")), so the recipe can be ' +
+                        'replayed with different parameter values in the future instead of only ever reusing ' +
+                        'the value from this one discovery run.\n\n' +
+                        'Also, rewrite it so that it removes hardcoding in terms of how many times a particular action should be done.\n' +
+                        '(eg. if an action is add new recipient named Watson, it should be generalised to work for multiple recipients not just one. We cannot assume a set number of recipients.)\n' +
+                        'Also, make sure that there is no fallbacks in the code: if there is no parameter provided, the code should throw an error or exception.\n' + 
+                        'Do not change anything else: selectors used to locate elements, control flow, ' +
+                        'imports, and exports must stay exactly as they are, and any literal that is NOT a ' +
+                        'copy of one of the parameters above (e.g. fixed site text, button labels) must also ' +
+                        'stay exactly as it is. If none of the parameters appear as hardcoded literals, return ' +
+                        'the file unchanged. Return only the full, updated file contents - no explanation, no ' +
+                        'markdown code fences.\n\n' +
+                        `\`\`\`ts\n${recipeSource}\n\`\`\``,
+                },
+            ],
+        });
+        rewritten = stripMarkdownFence(extractResponseText(response.content));
+    } catch (error) {
+        console.warn(
+            `Skipping recipe parameterization: model call failed (${error instanceof Error ? error.message : String(error)}). ` +
+            'Using the unparameterized recipe.',
+        );
+        return recipeSource;
+    }
+
+    if (!(await isValidRecipeSource(rewritten))) {
+        console.warn('Skipping recipe parameterization: rewritten recipe failed validation. Using the unparameterized recipe.');
+        return recipeSource;
+    }
+
+    return rewritten;
+}
+
+function extractResponseText(content: Array<{ type: string; text?: string }>): string {
+    return content
+        .filter((block): block is { type: string; text: string } => block.type === 'text' && typeof block.text === 'string')
+        .map((block) => block.text)
+        .join('\n')
+        .trim();
+}
+
+function stripMarkdownFence(source: string): string {
+    const fenced = source.match(/^```(?:ts|typescript)?\n([\s\S]*?)\n```$/);
+    return fenced ? fenced[1].trim() : source.trim();
+}
+
+/**
+ * Validates model-rewritten recipe source before it's trusted: checks the
+ * required exports are textually present, then actually loads it (via a
+ * throwaway file under recipes/, since the generated code's imports --
+ * '../recipeRuntime.ts' etc. -- are relative to that directory) to catch
+ * any syntax or structural error the rewrite introduced. The throwaway
+ * file is always removed afterward, whether validation passed or failed.
+ */
+async function isValidRecipeSource(source: string): Promise<boolean> {
+    if (!source || source.trim().length === 0) {
+        return false;
+    }
+    const requiredMarkers = ['export const TASK', 'export const ACTION', 'export const URL', 'export async function runAction'];
+    if (!requiredMarkers.every((marker) => source.includes(marker))) {
+        return false;
+    }
+
+    const tempPath = path.join('recipes', `.tmp-parameterize-${process.pid}-${Date.now()}.ts`);
+    try {
+        fs.mkdirSync(path.dirname(tempPath), { recursive: true });
+        fs.writeFileSync(tempPath, source);
+        const loaded = await import(pathToFileURL(path.resolve(tempPath)).href + `?t=${Date.now()}`);
+        return typeof loaded.runAction === 'function';
+    } catch {
+        return false;
+    } finally {
+        fs.rmSync(tempPath, { force: true });
+    }
 }
 
 function render(step: Step): string {

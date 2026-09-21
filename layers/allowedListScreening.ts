@@ -28,7 +28,7 @@ function isTaskParameters(value: unknown): value is TaskParameters {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function stripCodeFence(source: string): string {
+export function stripCodeFence(source: string): string {
     return source
         .trim()
         .replace(/^```(?:typescript|ts)?\s*/i, '')
@@ -60,7 +60,8 @@ Rules:
 - If no allowed task matches, return null.
 - Return a confidence between 0 and 1.
 - Confidence represents your confidence that the classification is correct, not how similar the wording is.
-- Parameters must be an object containing only values explicitly provided by the user and needed to perform the selected action.
+- Parameters must be an object containing values provided in the user request which are unique to a particular user's request and 
+not to the general task itself. Parameters serve as the arguments to the generalized tool that we are creating. 
 - Use an empty object when the request provides no action parameters.
 - Set isInformationRetrieval to true only when the selected action retrieves information for the user to read.
 - Return JSON only.
